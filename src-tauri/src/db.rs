@@ -1,0 +1,1329 @@
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    FromRow, Row, SqlitePool,
+};
+use std::str::FromStr;
+use uuid::Uuid;
+
+pub type DbPool = SqlitePool;
+
+// ─── Data Types ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Skill {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub file_path: String,
+    pub canonical_path: Option<String>,
+    pub is_central: bool,
+    pub source: Option<String>,
+    pub content: Option<String>,
+    pub scanned_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct SkillInstallation {
+    pub skill_id: String,
+    pub agent_id: String,
+    pub installed_path: String,
+    pub link_type: String,
+    pub symlink_target: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Agent {
+    pub id: String,
+    pub display_name: String,
+    pub category: String,
+    pub global_skills_dir: String,
+    pub project_skills_dir: Option<String>,
+    pub icon_name: Option<String>,
+    pub is_detected: bool,
+    pub is_builtin: bool,
+    pub is_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Collection {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ScanDirectory {
+    pub id: i64,
+    pub path: String,
+    pub label: Option<String>,
+    pub is_active: bool,
+    pub is_builtin: bool,
+    pub added_at: String,
+}
+
+// ─── Pool Creation ────────────────────────────────────────────────────────────
+
+/// Create a production SQLite pool for the given file path with WAL mode enabled.
+pub async fn create_pool(db_path: &str) -> Result<DbPool, String> {
+    let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path))
+        .map_err(|e| e.to_string())?
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal);
+
+    SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect_with(opts)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+
+/// Initialize all database tables (idempotent) and seed built-in agents.
+pub async fn init_database(pool: &DbPool) -> Result<(), String> {
+    // Enable WAL mode (no-op for in-memory databases)
+    sqlx::query("PRAGMA journal_mode=WAL")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // skills table
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS skills (
+            id             TEXT PRIMARY KEY,
+            name           TEXT NOT NULL,
+            description    TEXT,
+            file_path      TEXT NOT NULL,
+            canonical_path TEXT,
+            is_central     BOOLEAN NOT NULL DEFAULT 0,
+            source         TEXT,
+            content        TEXT,
+            scanned_at     TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // skill_installations table
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS skill_installations (
+            skill_id       TEXT NOT NULL,
+            agent_id       TEXT NOT NULL,
+            installed_path TEXT NOT NULL,
+            link_type      TEXT NOT NULL,
+            symlink_target TEXT,
+            PRIMARY KEY (skill_id, agent_id)
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // agents table
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS agents (
+            id                 TEXT PRIMARY KEY,
+            display_name       TEXT NOT NULL,
+            category           TEXT NOT NULL,
+            global_skills_dir  TEXT NOT NULL,
+            project_skills_dir TEXT,
+            icon_name          TEXT,
+            is_detected        BOOLEAN NOT NULL DEFAULT 0,
+            is_builtin         BOOLEAN NOT NULL DEFAULT 1,
+            is_enabled         BOOLEAN NOT NULL DEFAULT 1
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // collections table
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS collections (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            description TEXT,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // collection_skills table
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS collection_skills (
+            collection_id TEXT NOT NULL,
+            skill_id      TEXT NOT NULL,
+            added_at      TEXT NOT NULL,
+            PRIMARY KEY (collection_id, skill_id)
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // scan_directories table
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS scan_directories (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            path       TEXT NOT NULL UNIQUE,
+            label      TEXT,
+            is_active  BOOLEAN NOT NULL DEFAULT 1,
+            is_builtin BOOLEAN NOT NULL DEFAULT 0,
+            added_at   TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // settings table
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Seed built-in agents (INSERT OR IGNORE so repeated init is safe)
+    seed_builtin_agents(pool).await?;
+
+    Ok(())
+}
+
+async fn seed_builtin_agents(pool: &DbPool) -> Result<(), String> {
+    for agent in builtin_agents() {
+        sqlx::query(
+            "INSERT OR IGNORE INTO agents
+             (id, display_name, category, global_skills_dir, project_skills_dir,
+              icon_name, is_detected, is_builtin, is_enabled)
+             VALUES (?, ?, ?, ?, ?, ?, 0, 1, 1)",
+        )
+        .bind(&agent.id)
+        .bind(&agent.display_name)
+        .bind(&agent.category)
+        .bind(&agent.global_skills_dir)
+        .bind(&agent.project_skills_dir)
+        .bind(&agent.icon_name)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Returns the list of built-in agents using the current user's home directory.
+pub fn builtin_agents() -> Vec<Agent> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    vec![
+        Agent {
+            id: "claude-code".to_string(),
+            display_name: "Claude Code".to_string(),
+            category: "coding".to_string(),
+            global_skills_dir: format!("{}/.claude/skills", home),
+            project_skills_dir: None,
+            icon_name: Some("claude".to_string()),
+            is_detected: false,
+            is_builtin: true,
+            is_enabled: true,
+        },
+        Agent {
+            id: "codex".to_string(),
+            display_name: "Codex CLI".to_string(),
+            category: "coding".to_string(),
+            global_skills_dir: format!("{}/.agents/skills", home),
+            project_skills_dir: None,
+            icon_name: Some("codex".to_string()),
+            is_detected: false,
+            is_builtin: true,
+            is_enabled: true,
+        },
+        Agent {
+            id: "cursor".to_string(),
+            display_name: "Cursor".to_string(),
+            category: "coding".to_string(),
+            global_skills_dir: format!("{}/.cursor/skills", home),
+            project_skills_dir: None,
+            icon_name: Some("cursor".to_string()),
+            is_detected: false,
+            is_builtin: true,
+            is_enabled: true,
+        },
+        Agent {
+            id: "gemini-cli".to_string(),
+            display_name: "Gemini CLI".to_string(),
+            category: "coding".to_string(),
+            global_skills_dir: format!("{}/.gemini/skills", home),
+            project_skills_dir: None,
+            icon_name: Some("gemini".to_string()),
+            is_detected: false,
+            is_builtin: true,
+            is_enabled: true,
+        },
+        Agent {
+            id: "trae".to_string(),
+            display_name: "Trae".to_string(),
+            category: "coding".to_string(),
+            global_skills_dir: format!("{}/.trae/skills", home),
+            project_skills_dir: None,
+            icon_name: Some("trae".to_string()),
+            is_detected: false,
+            is_builtin: true,
+            is_enabled: true,
+        },
+        Agent {
+            id: "factory-droid".to_string(),
+            display_name: "Factory Droid".to_string(),
+            category: "coding".to_string(),
+            global_skills_dir: format!("{}/.factory/skills", home),
+            project_skills_dir: None,
+            icon_name: Some("factory".to_string()),
+            is_detected: false,
+            is_builtin: true,
+            is_enabled: true,
+        },
+        Agent {
+            id: "openclaw".to_string(),
+            display_name: "OpenClaw".to_string(),
+            category: "lobster".to_string(),
+            global_skills_dir: format!("{}/.openclaw/skills", home),
+            project_skills_dir: None,
+            icon_name: Some("openclaw".to_string()),
+            is_detected: false,
+            is_builtin: true,
+            is_enabled: true,
+        },
+        Agent {
+            id: "qclaw".to_string(),
+            display_name: "QClaw".to_string(),
+            category: "lobster".to_string(),
+            global_skills_dir: format!("{}/.qclaw/skills", home),
+            project_skills_dir: None,
+            icon_name: Some("qclaw".to_string()),
+            is_detected: false,
+            is_builtin: true,
+            is_enabled: true,
+        },
+        Agent {
+            id: "easyclaw".to_string(),
+            display_name: "EasyClaw".to_string(),
+            category: "lobster".to_string(),
+            global_skills_dir: format!("{}/.easyclaw/skills", home),
+            project_skills_dir: None,
+            icon_name: Some("easyclaw".to_string()),
+            is_detected: false,
+            is_builtin: true,
+            is_enabled: true,
+        },
+        Agent {
+            id: "workbuddy".to_string(),
+            display_name: "AutoClaw/WorkBuddy".to_string(),
+            category: "lobster".to_string(),
+            global_skills_dir: format!("{}/.workbuddy/skills", home),
+            project_skills_dir: None,
+            icon_name: Some("workbuddy".to_string()),
+            is_detected: false,
+            is_builtin: true,
+            is_enabled: true,
+        },
+        Agent {
+            id: "central".to_string(),
+            display_name: "Central Skills".to_string(),
+            category: "central".to_string(),
+            global_skills_dir: format!("{}/.agents/skills", home),
+            project_skills_dir: None,
+            icon_name: Some("central".to_string()),
+            is_detected: false,
+            is_builtin: true,
+            is_enabled: true,
+        },
+    ]
+}
+
+// ─── Skills ───────────────────────────────────────────────────────────────────
+
+/// Insert or replace a skill record.
+pub async fn upsert_skill(pool: &DbPool, skill: &Skill) -> Result<(), String> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO skills
+         (id, name, description, file_path, canonical_path, is_central, source, content, scanned_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&skill.id)
+    .bind(&skill.name)
+    .bind(&skill.description)
+    .bind(&skill.file_path)
+    .bind(&skill.canonical_path)
+    .bind(skill.is_central)
+    .bind(&skill.source)
+    .bind(&skill.content)
+    .bind(&skill.scanned_at)
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// Retrieve all skills installed for a given agent.
+pub async fn get_skills_by_agent(pool: &DbPool, agent_id: &str) -> Result<Vec<Skill>, String> {
+    sqlx::query_as::<_, Skill>(
+        "SELECT s.* FROM skills s
+         JOIN skill_installations si ON s.id = si.skill_id
+         WHERE si.agent_id = ?",
+    )
+    .bind(agent_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Retrieve all Central Skills (is_central = true).
+pub async fn get_central_skills(pool: &DbPool) -> Result<Vec<Skill>, String> {
+    sqlx::query_as::<_, Skill>("SELECT * FROM skills WHERE is_central = 1")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Retrieve a skill by its ID.
+pub async fn get_skill_by_id(pool: &DbPool, skill_id: &str) -> Result<Option<Skill>, String> {
+    sqlx::query_as::<_, Skill>("SELECT * FROM skills WHERE id = ?")
+        .bind(skill_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a skill and all its installation records.
+pub async fn delete_skill(pool: &DbPool, skill_id: &str) -> Result<(), String> {
+    sqlx::query("DELETE FROM skill_installations WHERE skill_id = ?")
+        .bind(skill_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    sqlx::query("DELETE FROM skills WHERE id = ?")
+        .bind(skill_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+// ─── Skill Installations ──────────────────────────────────────────────────────
+
+/// Insert or replace a skill installation record.
+pub async fn upsert_skill_installation(
+    pool: &DbPool,
+    installation: &SkillInstallation,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO skill_installations
+         (skill_id, agent_id, installed_path, link_type, symlink_target)
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&installation.skill_id)
+    .bind(&installation.agent_id)
+    .bind(&installation.installed_path)
+    .bind(&installation.link_type)
+    .bind(&installation.symlink_target)
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// Delete an installation record for a specific skill+agent pair.
+pub async fn delete_skill_installation(
+    pool: &DbPool,
+    skill_id: &str,
+    agent_id: &str,
+) -> Result<(), String> {
+    sqlx::query("DELETE FROM skill_installations WHERE skill_id = ? AND agent_id = ?")
+        .bind(skill_id)
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Retrieve all installation records for a given skill.
+pub async fn get_skill_installations(
+    pool: &DbPool,
+    skill_id: &str,
+) -> Result<Vec<SkillInstallation>, String> {
+    sqlx::query_as::<_, SkillInstallation>(
+        "SELECT * FROM skill_installations WHERE skill_id = ?",
+    )
+    .bind(skill_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+// ─── Agents ───────────────────────────────────────────────────────────────────
+
+/// Retrieve all agents.
+pub async fn get_all_agents(pool: &DbPool) -> Result<Vec<Agent>, String> {
+    sqlx::query_as::<_, Agent>("SELECT * FROM agents ORDER BY is_builtin DESC, display_name")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Retrieve a single agent by ID.
+pub async fn get_agent_by_id(pool: &DbPool, agent_id: &str) -> Result<Option<Agent>, String> {
+    sqlx::query_as::<_, Agent>("SELECT * FROM agents WHERE id = ?")
+        .bind(agent_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Update the `is_detected` flag for an agent.
+pub async fn update_agent_detected(
+    pool: &DbPool,
+    agent_id: &str,
+    is_detected: bool,
+) -> Result<(), String> {
+    sqlx::query("UPDATE agents SET is_detected = ? WHERE id = ?")
+        .bind(is_detected)
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Insert a new custom agent (non-builtin).
+pub async fn insert_custom_agent(pool: &DbPool, agent: &Agent) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO agents
+         (id, display_name, category, global_skills_dir, project_skills_dir,
+          icon_name, is_detected, is_builtin, is_enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1)",
+    )
+    .bind(&agent.id)
+    .bind(&agent.display_name)
+    .bind(&agent.category)
+    .bind(&agent.global_skills_dir)
+    .bind(&agent.project_skills_dir)
+    .bind(&agent.icon_name)
+    .bind(agent.is_detected)
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// Delete a custom (non-builtin) agent by ID. Returns an error if the agent is builtin.
+pub async fn delete_custom_agent(pool: &DbPool, agent_id: &str) -> Result<(), String> {
+    let agent = get_agent_by_id(pool, agent_id).await?;
+    match agent {
+        None => Err(format!("Agent '{}' not found", agent_id)),
+        Some(a) if a.is_builtin => Err(format!("Cannot delete built-in agent '{}'", agent_id)),
+        Some(_) => {
+            sqlx::query("DELETE FROM agents WHERE id = ?")
+                .bind(agent_id)
+                .execute(pool)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+    }
+}
+
+// ─── Collections ──────────────────────────────────────────────────────────────
+
+/// Create a new collection and return it.
+pub async fn create_collection(
+    pool: &DbPool,
+    name: &str,
+    description: Option<&str>,
+) -> Result<Collection, String> {
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO collections (id, name, description, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(name)
+    .bind(description)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    get_collection_by_id(pool, &id)
+        .await?
+        .ok_or_else(|| "Failed to retrieve newly created collection".to_string())
+}
+
+/// Retrieve all collections.
+pub async fn get_all_collections(pool: &DbPool) -> Result<Vec<Collection>, String> {
+    sqlx::query_as::<_, Collection>("SELECT * FROM collections ORDER BY created_at")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Retrieve a collection by ID.
+pub async fn get_collection_by_id(
+    pool: &DbPool,
+    collection_id: &str,
+) -> Result<Option<Collection>, String> {
+    sqlx::query_as::<_, Collection>("SELECT * FROM collections WHERE id = ?")
+        .bind(collection_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Update a collection's name and/or description.
+pub async fn update_collection(
+    pool: &DbPool,
+    collection_id: &str,
+    name: &str,
+    description: Option<&str>,
+) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "UPDATE collections SET name = ?, description = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(name)
+    .bind(description)
+    .bind(&now)
+    .bind(collection_id)
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// Delete a collection and all its skill memberships.
+pub async fn delete_collection(pool: &DbPool, collection_id: &str) -> Result<(), String> {
+    sqlx::query("DELETE FROM collection_skills WHERE collection_id = ?")
+        .bind(collection_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    sqlx::query("DELETE FROM collections WHERE id = ?")
+        .bind(collection_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Add a skill to a collection (idempotent).
+pub async fn add_skill_to_collection(
+    pool: &DbPool,
+    collection_id: &str,
+    skill_id: &str,
+) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT OR IGNORE INTO collection_skills (collection_id, skill_id, added_at)
+         VALUES (?, ?, ?)",
+    )
+    .bind(collection_id)
+    .bind(skill_id)
+    .bind(&now)
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// Remove a skill from a collection.
+pub async fn remove_skill_from_collection(
+    pool: &DbPool,
+    collection_id: &str,
+    skill_id: &str,
+) -> Result<(), String> {
+    sqlx::query("DELETE FROM collection_skills WHERE collection_id = ? AND skill_id = ?")
+        .bind(collection_id)
+        .bind(skill_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Retrieve all skills belonging to a collection.
+pub async fn get_collection_skills(
+    pool: &DbPool,
+    collection_id: &str,
+) -> Result<Vec<Skill>, String> {
+    sqlx::query_as::<_, Skill>(
+        "SELECT s.* FROM skills s
+         JOIN collection_skills cs ON s.id = cs.skill_id
+         WHERE cs.collection_id = ?
+         ORDER BY cs.added_at",
+    )
+    .bind(collection_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+// ─── Scan Directories ─────────────────────────────────────────────────────────
+
+/// Retrieve all scan directories.
+pub async fn get_scan_directories(pool: &DbPool) -> Result<Vec<ScanDirectory>, String> {
+    sqlx::query_as::<_, ScanDirectory>(
+        "SELECT * FROM scan_directories ORDER BY is_builtin DESC, added_at",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Add a new scan directory entry (non-builtin by default).
+pub async fn add_scan_directory(
+    pool: &DbPool,
+    path: &str,
+    label: Option<&str>,
+) -> Result<ScanDirectory, String> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO scan_directories (path, label, is_active, is_builtin, added_at)
+         VALUES (?, ?, 1, 0, ?)",
+    )
+    .bind(path)
+    .bind(label)
+    .bind(&now)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query_as::<_, ScanDirectory>("SELECT * FROM scan_directories WHERE path = ?")
+        .bind(path)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Remove a scan directory. Returns an error if the directory is builtin.
+pub async fn remove_scan_directory(pool: &DbPool, path: &str) -> Result<(), String> {
+    let row = sqlx::query("SELECT is_builtin FROM scan_directories WHERE path = ?")
+        .bind(path)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    match row {
+        None => Err(format!("Scan directory '{}' not found", path)),
+        Some(r) => {
+            let is_builtin: bool = r.try_get("is_builtin").map_err(|e| e.to_string())?;
+            if is_builtin {
+                return Err(format!("Cannot remove built-in scan directory '{}'", path));
+            }
+            sqlx::query("DELETE FROM scan_directories WHERE path = ?")
+                .bind(path)
+                .execute(pool)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// Toggle the `is_active` flag on a scan directory.
+pub async fn toggle_scan_directory(
+    pool: &DbPool,
+    path: &str,
+    is_active: bool,
+) -> Result<(), String> {
+    sqlx::query("UPDATE scan_directories SET is_active = ? WHERE path = ?")
+        .bind(is_active)
+        .bind(path)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+// ─── Settings ─────────────────────────────────────────────────────────────────
+
+/// Get a setting value by key.
+pub async fn get_setting(pool: &DbPool, key: &str) -> Result<Option<String>, String> {
+    let row = sqlx::query("SELECT value FROM settings WHERE key = ?")
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(row.map(|r| r.get::<String, _>("value")))
+}
+
+/// Set (upsert) a setting value.
+pub async fn set_setting(pool: &DbPool, key: &str, value: &str) -> Result<(), String> {
+    sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
+        .bind(key)
+        .bind(value)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create an in-memory SQLite pool and initialize the schema.
+    async fn setup_test_db() -> DbPool {
+        let pool = SqlitePool::connect(":memory:")
+            .await
+            .expect("Failed to create in-memory SQLite pool");
+        init_database(&pool)
+            .await
+            .expect("Failed to initialize test database");
+        pool
+    }
+
+    // ── Init ──────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_init_creates_all_tables() {
+        let pool = setup_test_db().await;
+
+        // Verify all 7 tables exist by counting rows (empty is fine)
+        let tables = [
+            "skills",
+            "skill_installations",
+            "agents",
+            "collections",
+            "collection_skills",
+            "scan_directories",
+            "settings",
+        ];
+        for table in &tables {
+            let result = sqlx::query(&format!("SELECT COUNT(*) as cnt FROM {}", table))
+                .fetch_one(&pool)
+                .await;
+            assert!(result.is_ok(), "Table '{}' should exist", table);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_init_is_idempotent() {
+        let pool = setup_test_db().await;
+        // Calling init_database again should not fail
+        let result = init_database(&pool).await;
+        assert!(result.is_ok(), "Second init should be idempotent");
+    }
+
+    #[tokio::test]
+    async fn test_builtin_agents_seeded() {
+        let pool = setup_test_db().await;
+        let agents = get_all_agents(&pool).await.unwrap();
+        assert_eq!(agents.len(), 11, "Should have exactly 11 built-in agents");
+
+        let ids: Vec<&str> = agents.iter().map(|a| a.id.as_str()).collect();
+        assert!(ids.contains(&"claude-code"));
+        assert!(ids.contains(&"codex"));
+        assert!(ids.contains(&"cursor"));
+        assert!(ids.contains(&"gemini-cli"));
+        assert!(ids.contains(&"trae"));
+        assert!(ids.contains(&"factory-droid"));
+        assert!(ids.contains(&"openclaw"));
+        assert!(ids.contains(&"qclaw"));
+        assert!(ids.contains(&"easyclaw"));
+        assert!(ids.contains(&"workbuddy"));
+        assert!(ids.contains(&"central"));
+    }
+
+    #[tokio::test]
+    async fn test_builtin_agents_are_marked_builtin() {
+        let pool = setup_test_db().await;
+        let agents = get_all_agents(&pool).await.unwrap();
+        for agent in &agents {
+            assert!(agent.is_builtin, "All seeded agents should be builtin");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_init_does_not_duplicate_agents_on_reinit() {
+        let pool = setup_test_db().await;
+        init_database(&pool).await.unwrap(); // Call a second time
+        let agents = get_all_agents(&pool).await.unwrap();
+        assert_eq!(agents.len(), 11, "Reinit must not duplicate agents");
+    }
+
+    // ── Skills ────────────────────────────────────────────────────────────────
+
+    fn make_skill(id: &str, name: &str, is_central: bool) -> Skill {
+        Skill {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: Some(format!("Description for {}", name)),
+            file_path: format!("/tmp/{}/SKILL.md", id),
+            canonical_path: if is_central {
+                Some(format!("/tmp/.agents/skills/{}", id))
+            } else {
+                None
+            },
+            is_central,
+            source: None,
+            content: Some("# Test Skill\n\nContent here.".to_string()),
+            scanned_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upsert_skill_insert() {
+        let pool = setup_test_db().await;
+        let skill = make_skill("test-skill", "Test Skill", false);
+        upsert_skill(&pool, &skill).await.unwrap();
+
+        let retrieved = get_skill_by_id(&pool, "test-skill").await.unwrap();
+        assert!(retrieved.is_some());
+        let s = retrieved.unwrap();
+        assert_eq!(s.name, "Test Skill");
+        assert!(!s.is_central);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_skill_update() {
+        let pool = setup_test_db().await;
+        let mut skill = make_skill("skill-1", "Original Name", false);
+        upsert_skill(&pool, &skill).await.unwrap();
+
+        skill.name = "Updated Name".to_string();
+        upsert_skill(&pool, &skill).await.unwrap();
+
+        let retrieved = get_skill_by_id(&pool, "skill-1").await.unwrap().unwrap();
+        assert_eq!(retrieved.name, "Updated Name");
+    }
+
+    #[tokio::test]
+    async fn test_get_skill_by_id_not_found() {
+        let pool = setup_test_db().await;
+        let result = get_skill_by_id(&pool, "nonexistent").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_central_skills() {
+        let pool = setup_test_db().await;
+        upsert_skill(&pool, &make_skill("central-1", "Central One", true))
+            .await
+            .unwrap();
+        upsert_skill(&pool, &make_skill("non-central", "Not Central", false))
+            .await
+            .unwrap();
+
+        let central = get_central_skills(&pool).await.unwrap();
+        assert_eq!(central.len(), 1);
+        assert_eq!(central[0].id, "central-1");
+    }
+
+    #[tokio::test]
+    async fn test_delete_skill() {
+        let pool = setup_test_db().await;
+        let skill = make_skill("to-delete", "Delete Me", false);
+        upsert_skill(&pool, &skill).await.unwrap();
+
+        delete_skill(&pool, "to-delete").await.unwrap();
+        let result = get_skill_by_id(&pool, "to-delete").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    // ── Skill Installations ───────────────────────────────────────────────────
+
+    fn make_installation(skill_id: &str, agent_id: &str, link_type: &str) -> SkillInstallation {
+        SkillInstallation {
+            skill_id: skill_id.to_string(),
+            agent_id: agent_id.to_string(),
+            installed_path: format!("/tmp/{}/{}", agent_id, skill_id),
+            link_type: link_type.to_string(),
+            symlink_target: if link_type == "symlink" {
+                Some(format!("/tmp/.agents/skills/{}", skill_id))
+            } else {
+                None
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upsert_and_get_skill_installation() {
+        let pool = setup_test_db().await;
+        let skill = make_skill("my-skill", "My Skill", false);
+        upsert_skill(&pool, &skill).await.unwrap();
+
+        let inst = make_installation("my-skill", "claude-code", "symlink");
+        upsert_skill_installation(&pool, &inst).await.unwrap();
+
+        let installations = get_skill_installations(&pool, "my-skill").await.unwrap();
+        assert_eq!(installations.len(), 1);
+        assert_eq!(installations[0].agent_id, "claude-code");
+        assert_eq!(installations[0].link_type, "symlink");
+    }
+
+    #[tokio::test]
+    async fn test_delete_skill_installation() {
+        let pool = setup_test_db().await;
+        let skill = make_skill("del-skill", "Del Skill", false);
+        upsert_skill(&pool, &skill).await.unwrap();
+        upsert_skill_installation(&pool, &make_installation("del-skill", "cursor", "copy"))
+            .await
+            .unwrap();
+
+        delete_skill_installation(&pool, "del-skill", "cursor")
+            .await
+            .unwrap();
+
+        let installations = get_skill_installations(&pool, "del-skill").await.unwrap();
+        assert!(installations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_skills_by_agent() {
+        let pool = setup_test_db().await;
+        let skill_a = make_skill("skill-a", "Skill A", false);
+        let skill_b = make_skill("skill-b", "Skill B", false);
+        upsert_skill(&pool, &skill_a).await.unwrap();
+        upsert_skill(&pool, &skill_b).await.unwrap();
+
+        upsert_skill_installation(&pool, &make_installation("skill-a", "claude-code", "symlink"))
+            .await
+            .unwrap();
+        upsert_skill_installation(&pool, &make_installation("skill-b", "cursor", "copy"))
+            .await
+            .unwrap();
+
+        let claude_skills = get_skills_by_agent(&pool, "claude-code").await.unwrap();
+        assert_eq!(claude_skills.len(), 1);
+        assert_eq!(claude_skills[0].id, "skill-a");
+
+        let cursor_skills = get_skills_by_agent(&pool, "cursor").await.unwrap();
+        assert_eq!(cursor_skills.len(), 1);
+        assert_eq!(cursor_skills[0].id, "skill-b");
+
+        let empty = get_skills_by_agent(&pool, "codex").await.unwrap();
+        assert!(empty.is_empty());
+    }
+
+    // ── Agents ────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_agent_by_id() {
+        let pool = setup_test_db().await;
+        let agent = get_agent_by_id(&pool, "claude-code").await.unwrap();
+        assert!(agent.is_some());
+        let a = agent.unwrap();
+        assert_eq!(a.display_name, "Claude Code");
+        assert_eq!(a.category, "coding");
+        assert!(a.is_builtin);
+    }
+
+    #[tokio::test]
+    async fn test_get_agent_by_id_not_found() {
+        let pool = setup_test_db().await;
+        let agent = get_agent_by_id(&pool, "nonexistent-agent").await.unwrap();
+        assert!(agent.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_update_agent_detected() {
+        let pool = setup_test_db().await;
+        update_agent_detected(&pool, "cursor", true).await.unwrap();
+        let agent = get_agent_by_id(&pool, "cursor").await.unwrap().unwrap();
+        assert!(agent.is_detected);
+
+        update_agent_detected(&pool, "cursor", false).await.unwrap();
+        let agent = get_agent_by_id(&pool, "cursor").await.unwrap().unwrap();
+        assert!(!agent.is_detected);
+    }
+
+    #[tokio::test]
+    async fn test_insert_custom_agent() {
+        let pool = setup_test_db().await;
+        let custom = Agent {
+            id: "my-custom-agent".to_string(),
+            display_name: "My Custom Agent".to_string(),
+            category: "other".to_string(),
+            global_skills_dir: "/tmp/custom/skills".to_string(),
+            project_skills_dir: None,
+            icon_name: None,
+            is_detected: false,
+            is_builtin: false,
+            is_enabled: true,
+        };
+        insert_custom_agent(&pool, &custom).await.unwrap();
+
+        let all = get_all_agents(&pool).await.unwrap();
+        assert_eq!(all.len(), 12, "Should have 11 builtins + 1 custom");
+
+        let retrieved = get_agent_by_id(&pool, "my-custom-agent")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!retrieved.is_builtin);
+        assert_eq!(retrieved.display_name, "My Custom Agent");
+    }
+
+    #[tokio::test]
+    async fn test_delete_custom_agent() {
+        let pool = setup_test_db().await;
+        let custom = Agent {
+            id: "deletable-agent".to_string(),
+            display_name: "Deletable".to_string(),
+            category: "other".to_string(),
+            global_skills_dir: "/tmp/deletable/skills".to_string(),
+            project_skills_dir: None,
+            icon_name: None,
+            is_detected: false,
+            is_builtin: false,
+            is_enabled: true,
+        };
+        insert_custom_agent(&pool, &custom).await.unwrap();
+        delete_custom_agent(&pool, "deletable-agent").await.unwrap();
+
+        let retrieved = get_agent_by_id(&pool, "deletable-agent").await.unwrap();
+        assert!(retrieved.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cannot_delete_builtin_agent() {
+        let pool = setup_test_db().await;
+        let result = delete_custom_agent(&pool, "claude-code").await;
+        assert!(result.is_err(), "Should not be able to delete built-in agent");
+    }
+
+    // ── Collections ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_create_collection() {
+        let pool = setup_test_db().await;
+        let col = create_collection(&pool, "My Collection", Some("A test collection"))
+            .await
+            .unwrap();
+        assert!(!col.id.is_empty());
+        assert_eq!(col.name, "My Collection");
+        assert_eq!(col.description.as_deref(), Some("A test collection"));
+    }
+
+    #[tokio::test]
+    async fn test_get_all_collections() {
+        let pool = setup_test_db().await;
+        create_collection(&pool, "Collection A", None).await.unwrap();
+        create_collection(&pool, "Collection B", Some("Desc")).await.unwrap();
+
+        let all = get_all_collections(&pool).await.unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_update_collection() {
+        let pool = setup_test_db().await;
+        let col = create_collection(&pool, "Old Name", None).await.unwrap();
+        update_collection(&pool, &col.id, "New Name", Some("New desc"))
+            .await
+            .unwrap();
+
+        let updated = get_collection_by_id(&pool, &col.id).await.unwrap().unwrap();
+        assert_eq!(updated.name, "New Name");
+        assert_eq!(updated.description.as_deref(), Some("New desc"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_collection() {
+        let pool = setup_test_db().await;
+        let col = create_collection(&pool, "To Delete", None).await.unwrap();
+        delete_collection(&pool, &col.id).await.unwrap();
+
+        let retrieved = get_collection_by_id(&pool, &col.id).await.unwrap();
+        assert!(retrieved.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_add_and_remove_skill_from_collection() {
+        let pool = setup_test_db().await;
+        let skill = make_skill("collection-skill", "Collection Skill", false);
+        upsert_skill(&pool, &skill).await.unwrap();
+        let col = create_collection(&pool, "Test Col", None).await.unwrap();
+
+        add_skill_to_collection(&pool, &col.id, "collection-skill")
+            .await
+            .unwrap();
+
+        let skills = get_collection_skills(&pool, &col.id).await.unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].id, "collection-skill");
+
+        remove_skill_from_collection(&pool, &col.id, "collection-skill")
+            .await
+            .unwrap();
+
+        let skills_after = get_collection_skills(&pool, &col.id).await.unwrap();
+        assert!(skills_after.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_add_skill_to_collection_is_idempotent() {
+        let pool = setup_test_db().await;
+        let skill = make_skill("idem-skill", "Idem Skill", false);
+        upsert_skill(&pool, &skill).await.unwrap();
+        let col = create_collection(&pool, "Idem Col", None).await.unwrap();
+
+        add_skill_to_collection(&pool, &col.id, "idem-skill")
+            .await
+            .unwrap();
+        add_skill_to_collection(&pool, &col.id, "idem-skill")
+            .await
+            .unwrap();
+
+        let skills = get_collection_skills(&pool, &col.id).await.unwrap();
+        assert_eq!(skills.len(), 1, "Duplicate add should be a no-op");
+    }
+
+    #[tokio::test]
+    async fn test_delete_collection_also_removes_skill_memberships() {
+        let pool = setup_test_db().await;
+        let skill = make_skill("cascade-skill", "Cascade Skill", false);
+        upsert_skill(&pool, &skill).await.unwrap();
+        let col = create_collection(&pool, "Cascade Col", None).await.unwrap();
+        add_skill_to_collection(&pool, &col.id, "cascade-skill")
+            .await
+            .unwrap();
+
+        delete_collection(&pool, &col.id).await.unwrap();
+
+        // The collection_skills row should also be gone
+        let rows: Vec<_> =
+            sqlx::query("SELECT * FROM collection_skills WHERE collection_id = ?")
+                .bind(&col.id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(rows.is_empty(), "Memberships should be cascade-deleted");
+    }
+
+    // ── Scan Directories ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_add_scan_directory() {
+        let pool = setup_test_db().await;
+        let dir = add_scan_directory(&pool, "/tmp/my-project", Some("My Project"))
+            .await
+            .unwrap();
+        assert_eq!(dir.path, "/tmp/my-project");
+        assert_eq!(dir.label.as_deref(), Some("My Project"));
+        assert!(dir.is_active);
+        assert!(!dir.is_builtin);
+    }
+
+    #[tokio::test]
+    async fn test_get_scan_directories() {
+        let pool = setup_test_db().await;
+        add_scan_directory(&pool, "/tmp/dir-a", None).await.unwrap();
+        add_scan_directory(&pool, "/tmp/dir-b", Some("Dir B"))
+            .await
+            .unwrap();
+
+        let dirs = get_scan_directories(&pool).await.unwrap();
+        assert_eq!(dirs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_remove_scan_directory() {
+        let pool = setup_test_db().await;
+        add_scan_directory(&pool, "/tmp/removable", None).await.unwrap();
+        remove_scan_directory(&pool, "/tmp/removable").await.unwrap();
+
+        let dirs = get_scan_directories(&pool).await.unwrap();
+        assert!(dirs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_cannot_remove_builtin_scan_directory() {
+        let pool = setup_test_db().await;
+        // Manually insert a builtin directory
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO scan_directories (path, is_active, is_builtin, added_at)
+             VALUES ('/builtin/path', 1, 1, ?)",
+        )
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let result = remove_scan_directory(&pool, "/builtin/path").await;
+        assert!(result.is_err(), "Should not remove a builtin scan directory");
+    }
+
+    #[tokio::test]
+    async fn test_remove_nonexistent_scan_directory_returns_error() {
+        let pool = setup_test_db().await;
+        let result = remove_scan_directory(&pool, "/nonexistent/path").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_toggle_scan_directory() {
+        let pool = setup_test_db().await;
+        add_scan_directory(&pool, "/tmp/toggle-dir", None).await.unwrap();
+        toggle_scan_directory(&pool, "/tmp/toggle-dir", false).await.unwrap();
+
+        let dirs = get_scan_directories(&pool).await.unwrap();
+        let dir = dirs.iter().find(|d| d.path == "/tmp/toggle-dir").unwrap();
+        assert!(!dir.is_active);
+    }
+
+    // ── Settings ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_set_and_get_setting() {
+        let pool = setup_test_db().await;
+        set_setting(&pool, "theme", "dark").await.unwrap();
+        let value = get_setting(&pool, "theme").await.unwrap();
+        assert_eq!(value.as_deref(), Some("dark"));
+    }
+
+    #[tokio::test]
+    async fn test_get_missing_setting_returns_none() {
+        let pool = setup_test_db().await;
+        let value = get_setting(&pool, "nonexistent_key").await.unwrap();
+        assert!(value.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_setting_upserts() {
+        let pool = setup_test_db().await;
+        set_setting(&pool, "lang", "en").await.unwrap();
+        set_setting(&pool, "lang", "zh").await.unwrap();
+        let value = get_setting(&pool, "lang").await.unwrap();
+        assert_eq!(value.as_deref(), Some("zh"));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_settings() {
+        let pool = setup_test_db().await;
+        set_setting(&pool, "key1", "val1").await.unwrap();
+        set_setting(&pool, "key2", "val2").await.unwrap();
+        set_setting(&pool, "key3", "val3").await.unwrap();
+
+        assert_eq!(get_setting(&pool, "key1").await.unwrap().as_deref(), Some("val1"));
+        assert_eq!(get_setting(&pool, "key2").await.unwrap().as_deref(), Some("val2"));
+        assert_eq!(get_setting(&pool, "key3").await.unwrap().as_deref(), Some("val3"));
+    }
+}
