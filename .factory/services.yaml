@@ -1,0 +1,16 @@
+commands:
+  install: pnpm install
+  typecheck: pnpm typecheck
+  build: pnpm tauri build
+  test: pnpm test
+  test-rust: cd src-tauri && cargo test
+  lint: pnpm lint
+  clippy: cd src-tauri && cargo clippy -- -D warnings
+
+services:
+  tauri-dev:
+    start: pnpm tauri dev
+    stop: lsof -ti :1420 | xargs kill 2>/dev/null; lsof -ti :1421 | xargs kill 2>/dev/null
+    healthcheck: curl -sf http://localhost:1420
+    port: 1420
+    depends_on: []
