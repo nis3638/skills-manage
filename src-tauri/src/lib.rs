@@ -53,6 +53,8 @@ pub fn run() {
             commands::agents::get_agents,
             commands::agents::detect_agents,
             commands::agents::add_custom_agent,
+            commands::agents::update_custom_agent,
+            commands::agents::remove_custom_agent,
             // Linker
             commands::linker::install_skill_to_agent,
             commands::linker::uninstall_skill_from_agent,
@@ -73,6 +75,12 @@ pub fn run() {
             commands::collections::batch_install_collection,
             commands::collections::export_collection,
             commands::collections::import_collection,
+            // Settings
+            commands::settings::get_scan_directories,
+            commands::settings::add_scan_directory,
+            commands::settings::remove_scan_directory,
+            commands::settings::get_setting,
+            commands::settings::set_setting,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

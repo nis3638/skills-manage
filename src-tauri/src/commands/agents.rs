@@ -42,6 +42,17 @@ pub struct CustomAgentConfig {
     pub global_skills_dir: String,
 }
 
+/// Payload for updating an existing user-defined agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateCustomAgentConfig {
+    /// Human-readable name shown in the UI.
+    pub display_name: String,
+    /// Agent category — "coding", "lobster", or "other".
+    pub category: Option<String>,
+    /// Absolute path to the agent's global skills directory.
+    pub global_skills_dir: String,
+}
+
 // ─── Detection Helpers ────────────────────────────────────────────────────────
 
 /// Returns `true` if the agent appears to be installed on the current machine.
@@ -163,6 +174,38 @@ pub async fn add_custom_agent_impl(
     Ok(agent_to_with_status(persisted))
 }
 
+/// Update an existing user-defined (non-builtin) agent and return its updated representation.
+pub async fn update_custom_agent_impl(
+    pool: &DbPool,
+    agent_id: &str,
+    config: UpdateCustomAgentConfig,
+) -> Result<AgentWithStatus, String> {
+    if config.display_name.trim().is_empty() {
+        return Err("Agent display name cannot be empty".to_string());
+    }
+    if config.global_skills_dir.trim().is_empty() {
+        return Err("Agent global skills directory cannot be empty".to_string());
+    }
+
+    let category = config.category.unwrap_or_else(|| "other".to_string());
+
+    let updated = db::update_custom_agent(
+        pool,
+        agent_id,
+        config.display_name.trim(),
+        &category,
+        config.global_skills_dir.trim(),
+    )
+    .await?;
+
+    Ok(agent_to_with_status(updated))
+}
+
+/// Remove a user-defined (non-builtin) agent by ID.
+pub async fn remove_custom_agent_impl(pool: &DbPool, agent_id: &str) -> Result<(), String> {
+    db::delete_custom_agent(pool, agent_id).await
+}
+
 // ─── Tauri Commands ───────────────────────────────────────────────────────────
 
 /// Tauri command: return all registered agents with live detection status.
@@ -184,6 +227,25 @@ pub async fn add_custom_agent(
     config: CustomAgentConfig,
 ) -> Result<AgentWithStatus, String> {
     add_custom_agent_impl(&state.db, config).await
+}
+
+/// Tauri command: update an existing user-defined agent.
+#[tauri::command]
+pub async fn update_custom_agent(
+    state: State<'_, AppState>,
+    agent_id: String,
+    config: UpdateCustomAgentConfig,
+) -> Result<AgentWithStatus, String> {
+    update_custom_agent_impl(&state.db, &agent_id, config).await
+}
+
+/// Tauri command: remove a user-defined (non-builtin) agent by ID.
+#[tauri::command]
+pub async fn remove_custom_agent(
+    state: State<'_, AppState>,
+    agent_id: String,
+) -> Result<(), String> {
+    remove_custom_agent_impl(&state.db, &agent_id).await
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -412,5 +474,123 @@ mod tests {
 
         let agent = add_custom_agent_impl(&pool, config).await.unwrap();
         assert_eq!(agent.category, "other", "default category should be 'other'");
+    }
+
+    // ── update_custom_agent_impl ──────────────────────────────────────────────
+
+    async fn add_test_custom_agent(pool: &DbPool, id: &str) {
+        let config = CustomAgentConfig {
+            id: Some(id.to_string()),
+            display_name: format!("Agent {}", id),
+            category: Some("other".to_string()),
+            global_skills_dir: format!("/tmp/{}/skills", id),
+        };
+        add_custom_agent_impl(pool, config).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_update_custom_agent_changes_fields() {
+        let pool = setup_test_db().await;
+        add_test_custom_agent(&pool, "update-me").await;
+
+        let config = UpdateCustomAgentConfig {
+            display_name: "Updated Name".to_string(),
+            category: Some("coding".to_string()),
+            global_skills_dir: "/tmp/updated/skills".to_string(),
+        };
+
+        let updated = update_custom_agent_impl(&pool, "update-me", config).await.unwrap();
+        assert_eq!(updated.display_name, "Updated Name");
+        assert_eq!(updated.category, "coding");
+        assert_eq!(updated.global_skills_dir, "/tmp/updated/skills");
+        assert!(!updated.is_builtin);
+    }
+
+    #[tokio::test]
+    async fn test_update_custom_agent_default_category() {
+        let pool = setup_test_db().await;
+        add_test_custom_agent(&pool, "cat-default").await;
+
+        let config = UpdateCustomAgentConfig {
+            display_name: "Cat Default".to_string(),
+            category: None,
+            global_skills_dir: "/tmp/cat-default/skills".to_string(),
+        };
+
+        let updated = update_custom_agent_impl(&pool, "cat-default", config).await.unwrap();
+        assert_eq!(updated.category, "other", "default category should be 'other'");
+    }
+
+    #[tokio::test]
+    async fn test_update_custom_agent_not_found_fails() {
+        let pool = setup_test_db().await;
+
+        let config = UpdateCustomAgentConfig {
+            display_name: "Ghost".to_string(),
+            category: None,
+            global_skills_dir: "/tmp/ghost/skills".to_string(),
+        };
+
+        let result = update_custom_agent_impl(&pool, "nonexistent-agent", config).await;
+        assert!(result.is_err(), "Updating a nonexistent agent should fail");
+    }
+
+    #[tokio::test]
+    async fn test_update_builtin_agent_fails() {
+        let pool = setup_test_db().await;
+
+        let config = UpdateCustomAgentConfig {
+            display_name: "Hacked Name".to_string(),
+            category: None,
+            global_skills_dir: "/tmp/hacked/skills".to_string(),
+        };
+
+        let result = update_custom_agent_impl(&pool, "claude-code", config).await;
+        assert!(result.is_err(), "Updating a built-in agent should fail");
+    }
+
+    #[tokio::test]
+    async fn test_update_custom_agent_empty_display_name_fails() {
+        let pool = setup_test_db().await;
+        add_test_custom_agent(&pool, "empty-name").await;
+
+        let config = UpdateCustomAgentConfig {
+            display_name: "   ".to_string(),
+            category: None,
+            global_skills_dir: "/tmp/empty-name/skills".to_string(),
+        };
+
+        let result = update_custom_agent_impl(&pool, "empty-name", config).await;
+        assert!(result.is_err(), "Empty display name should fail validation");
+    }
+
+    // ── remove_custom_agent_impl ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_remove_custom_agent_success() {
+        let pool = setup_test_db().await;
+        add_test_custom_agent(&pool, "removable").await;
+
+        remove_custom_agent_impl(&pool, "removable").await.unwrap();
+
+        let agents = get_agents_impl(&pool).await.unwrap();
+        assert!(
+            agents.iter().all(|a| a.id != "removable"),
+            "Removed agent should no longer appear in agent list"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_custom_agent_not_found_fails() {
+        let pool = setup_test_db().await;
+        let result = remove_custom_agent_impl(&pool, "ghost-agent").await;
+        assert!(result.is_err(), "Removing a nonexistent agent should fail");
+    }
+
+    #[tokio::test]
+    async fn test_remove_builtin_agent_fails() {
+        let pool = setup_test_db().await;
+        let result = remove_custom_agent_impl(&pool, "cursor").await;
+        assert!(result.is_err(), "Removing a built-in agent should fail");
     }
 }

@@ -749,6 +749,40 @@ pub async fn delete_custom_agent(pool: &DbPool, agent_id: &str) -> Result<(), St
     }
 }
 
+/// Update a custom (non-builtin) agent's mutable fields.
+/// Returns the updated agent record, or an error if the agent is builtin or not found.
+pub async fn update_custom_agent(
+    pool: &DbPool,
+    agent_id: &str,
+    display_name: &str,
+    category: &str,
+    global_skills_dir: &str,
+) -> Result<Agent, String> {
+    let agent = get_agent_by_id(pool, agent_id).await?;
+    match agent {
+        None => return Err(format!("Agent '{}' not found", agent_id)),
+        Some(a) if a.is_builtin => {
+            return Err(format!("Cannot update built-in agent '{}'", agent_id))
+        }
+        Some(_) => {}
+    }
+
+    sqlx::query(
+        "UPDATE agents SET display_name = ?, category = ?, global_skills_dir = ? WHERE id = ?",
+    )
+    .bind(display_name)
+    .bind(category)
+    .bind(global_skills_dir)
+    .bind(agent_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    get_agent_by_id(pool, agent_id)
+        .await?
+        .ok_or_else(|| "Failed to retrieve updated agent".to_string())
+}
+
 // ─── Collections ──────────────────────────────────────────────────────────────
 
 /// Create a new collection and return it.
