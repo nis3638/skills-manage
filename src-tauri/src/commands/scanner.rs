@@ -614,11 +614,18 @@ mod tests {
             .await
             .expect("in-memory DB");
         db::init_database(&pool).await.expect("init");
-        // Remove all seeded agents so we control exactly what gets scanned.
+        // Remove all seeded agents so the test is isolated from whatever the
+        // user has installed on their machine.
         sqlx::query("DELETE FROM agents")
             .execute(&pool)
             .await
             .expect("delete agents");
+        // Also clear the builtin scan directories that init_database seeds,
+        // so the custom-scan-dir loop has nothing to scan either.
+        sqlx::query("DELETE FROM scan_directories")
+            .execute(&pool)
+            .await
+            .expect("delete scan_directories");
 
         // Add one agent whose skills dir definitely does not exist.
         let dummy_agent = db::Agent {

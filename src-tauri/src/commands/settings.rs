@@ -126,11 +126,37 @@ mod tests {
 
     // ── get_scan_directories_impl ─────────────────────────────────────────────
 
+    /// Counts unique global_skills_dir paths across all built-in agents — the
+    /// same number that seed_builtin_scan_directories inserts.
+    fn expected_builtin_count() -> usize {
+        let mut paths = std::collections::HashSet::new();
+        for agent in db::builtin_agents() {
+            paths.insert(agent.global_skills_dir);
+        }
+        paths.len()
+    }
+
     #[tokio::test]
-    async fn test_get_scan_directories_empty_initially() {
+    async fn test_get_scan_directories_has_builtin_dirs_initially() {
         let pool = setup_test_db().await;
         let dirs = get_scan_directories_impl(&pool).await.unwrap();
-        assert!(dirs.is_empty(), "Should be no scan directories on a fresh database");
+        let builtin_count = expected_builtin_count();
+        // After init, built-in scan directories are seeded automatically.
+        assert_eq!(
+            dirs.len(),
+            builtin_count,
+            "Fresh database should have {} built-in scan directories, got {}",
+            builtin_count,
+            dirs.len()
+        );
+        // All seeded rows must be marked built-in.
+        for dir in &dirs {
+            assert!(
+                dir.is_builtin,
+                "Scan directory '{}' seeded during init must have is_builtin=true",
+                dir.path
+            );
+        }
     }
 
     #[tokio::test]
@@ -140,7 +166,9 @@ mod tests {
         add_scan_directory_impl(&pool, "/tmp/proj-b", None).await.unwrap();
 
         let dirs = get_scan_directories_impl(&pool).await.unwrap();
-        assert_eq!(dirs.len(), 2);
+        // N built-in dirs are already there; we added 2 custom ones.
+        let builtin_count = expected_builtin_count();
+        assert_eq!(dirs.len(), builtin_count + 2);
         let paths: Vec<&str> = dirs.iter().map(|d| d.path.as_str()).collect();
         assert!(paths.contains(&"/tmp/proj-a"));
         assert!(paths.contains(&"/tmp/proj-b"));
@@ -193,7 +221,13 @@ mod tests {
         remove_scan_directory_impl(&pool, "/tmp/removable").await.unwrap();
 
         let dirs = get_scan_directories_impl(&pool).await.unwrap();
-        assert!(dirs.is_empty(), "Directory should be removed");
+        // Built-in dirs remain; only the custom /tmp/removable should be gone.
+        let builtin_count = expected_builtin_count();
+        assert_eq!(dirs.len(), builtin_count, "Only the custom directory should be removed");
+        assert!(
+            !dirs.iter().any(|d| d.path == "/tmp/removable"),
+            "Removed directory must not appear in the list"
+        );
     }
 
     #[tokio::test]

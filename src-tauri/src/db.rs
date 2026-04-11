@@ -238,6 +238,11 @@ pub async fn init_database(pool: &DbPool) -> Result<(), String> {
     // Seed built-in agents (INSERT OR IGNORE so repeated init is safe)
     seed_builtin_agents(pool).await?;
 
+    // Seed built-in scan directories from the built-in agent registry.
+    // Uses INSERT OR IGNORE so repeated init is idempotent even when
+    // two agents share the same global_skills_dir (e.g. codex + central).
+    seed_builtin_scan_directories(pool).await?;
+
     Ok(())
 }
 
@@ -255,6 +260,29 @@ async fn seed_builtin_agents(pool: &DbPool) -> Result<(), String> {
         .bind(&agent.global_skills_dir)
         .bind(&agent.project_skills_dir)
         .bind(&agent.icon_name)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Seed `scan_directories` with one row per unique `global_skills_dir` path
+/// across all built-in agents.  Rows are marked `is_builtin = 1` and cannot
+/// be removed by the user.  `INSERT OR IGNORE` keeps the operation idempotent:
+/// if two built-in agents share the same path (codex and central both use
+/// `~/.agents/skills`) only the first insert takes effect.
+async fn seed_builtin_scan_directories(pool: &DbPool) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
+    for agent in builtin_agents() {
+        sqlx::query(
+            "INSERT OR IGNORE INTO scan_directories
+             (path, label, is_active, is_builtin, added_at)
+             VALUES (?, ?, 1, 1, ?)",
+        )
+        .bind(&agent.global_skills_dir)
+        .bind(&agent.display_name)
+        .bind(&now)
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -1460,6 +1488,73 @@ mod tests {
 
     // ── Scan Directories ──────────────────────────────────────────────────────
 
+    /// Returns the number of *unique* global_skills_dir paths across all
+    /// built-in agents.  This is the number of rows that seed_builtin_scan_directories
+    /// inserts (codex and central share ~/.agents/skills, so the count is 10).
+    fn expected_builtin_scan_dir_count() -> usize {
+        let mut paths = std::collections::HashSet::new();
+        for agent in builtin_agents() {
+            paths.insert(agent.global_skills_dir);
+        }
+        paths.len()
+    }
+
+    #[tokio::test]
+    async fn test_builtin_scan_dirs_seeded() {
+        let pool = setup_test_db().await;
+        let dirs = get_scan_directories(&pool).await.unwrap();
+        let builtin_count = expected_builtin_scan_dir_count();
+
+        // Expect exactly one row per unique global_skills_dir across built-in agents.
+        assert_eq!(
+            dirs.len(),
+            builtin_count,
+            "Should have {} built-in scan directories after init (got {})",
+            builtin_count,
+            dirs.len()
+        );
+
+        // Every seeded row must be marked as built-in and active.
+        for dir in &dirs {
+            assert!(
+                dir.is_builtin,
+                "Seeded scan directory '{}' must have is_builtin=true",
+                dir.path
+            );
+            assert!(
+                dir.is_active,
+                "Seeded scan directory '{}' must be active by default",
+                dir.path
+            );
+        }
+
+        // The paths must match the unique global_skills_dir values.
+        let seeded_paths: std::collections::HashSet<&str> =
+            dirs.iter().map(|d| d.path.as_str()).collect();
+        for agent in builtin_agents() {
+            assert!(
+                seeded_paths.contains(agent.global_skills_dir.as_str()),
+                "Built-in agent '{}' global_skills_dir '{}' must be in scan_directories",
+                agent.id,
+                agent.global_skills_dir
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_builtin_scan_dirs_seeded_is_idempotent() {
+        let pool = setup_test_db().await;
+        // Second call to init_database must not create duplicate rows.
+        init_database(&pool).await.unwrap();
+        let dirs = get_scan_directories(&pool).await.unwrap();
+        let builtin_count = expected_builtin_scan_dir_count();
+        assert_eq!(
+            dirs.len(),
+            builtin_count,
+            "Repeated init must not create duplicate scan directory rows"
+        );
+    }
+
     #[tokio::test]
     async fn test_add_scan_directory() {
         let pool = setup_test_db().await;
@@ -1481,7 +1576,14 @@ mod tests {
             .unwrap();
 
         let dirs = get_scan_directories(&pool).await.unwrap();
-        assert_eq!(dirs.len(), 2);
+        // There are N built-in dirs (seeded on init) plus the 2 we just added.
+        let builtin_count = expected_builtin_scan_dir_count();
+        assert_eq!(dirs.len(), builtin_count + 2);
+
+        // Verify the custom ones are present.
+        let paths: Vec<&str> = dirs.iter().map(|d| d.path.as_str()).collect();
+        assert!(paths.contains(&"/tmp/dir-a"));
+        assert!(paths.contains(&"/tmp/dir-b"));
     }
 
     #[tokio::test]
@@ -1491,7 +1593,10 @@ mod tests {
         remove_scan_directory(&pool, "/tmp/removable").await.unwrap();
 
         let dirs = get_scan_directories(&pool).await.unwrap();
-        assert!(dirs.is_empty());
+        // Built-in dirs remain; only the custom one is removed.
+        let builtin_count = expected_builtin_scan_dir_count();
+        assert_eq!(dirs.len(), builtin_count);
+        assert!(!dirs.iter().any(|d| d.path == "/tmp/removable"));
     }
 
     #[tokio::test]
