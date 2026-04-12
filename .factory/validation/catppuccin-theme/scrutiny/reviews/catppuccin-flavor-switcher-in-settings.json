@@ -1,0 +1,15 @@
+{
+  "featureId": "catppuccin-flavor-switcher-in-settings",
+  "reviewedAt": "2026-04-12T14:20:04Z",
+  "commitId": "5285778",
+  "transcriptSkeletonReviewed": false,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The settings page now exposes four translated Catppuccin flavor buttons beside the existing language controls, uses the required default/outline active-state pattern with `aria-pressed`, wires each button directly to `setFlavor(...)`, and covers the new UI in SettingsView tests. Given the existing `currentColor`-based platform icons and the new theme-token wiring from the paired theme feature, I did not find a correctness issue against VAL-THEME-006 or VAL-THEME-007 in the current source.",
+    "issues": []
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": null,
+  "summary": "Pass. Commit `5285778` adds the Catppuccin flavor switcher with translated labels, color preview dots, correct active-state semantics, and direct `setFlavor` wiring."
+}
