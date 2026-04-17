@@ -22,6 +22,7 @@ import {
   saveReturnContext,
   saveScrollPosition,
 } from "../lib/scrollRestoration";
+import * as scrollRestoration from "../lib/scrollRestoration";
 
 // ─── Mock stores ──────────────────────────────────────────────────────────────
 
@@ -35,6 +36,33 @@ vi.mock("../stores/platformStore", () => ({
 
 vi.mock("../stores/centralSkillsStore", () => ({
   useCentralSkillsStore: vi.fn(),
+}));
+
+vi.mock("../components/skill/SkillDetailDrawer", () => ({
+  SkillDetailDrawer: ({
+    open,
+    skillId,
+    onOpenChange,
+    returnFocusRef,
+  }: {
+    open: boolean;
+    skillId: string | null;
+    onOpenChange: (open: boolean) => void;
+    returnFocusRef?: { current: HTMLElement | null };
+  }) =>
+    open ? (
+      <div data-testid="skill-detail-drawer">
+        <div>drawer-skill:{skillId}</div>
+        <button
+          onClick={() => {
+            onOpenChange(false);
+            returnFocusRef?.current?.focus();
+          }}
+        >
+          Close drawer
+        </button>
+      </div>
+    ) : null,
 }));
 
 import { useCollectionStore } from "../stores/collectionStore";
@@ -362,6 +390,57 @@ describe("CollectionsListView", () => {
       key: "collection:col-1",
       scrollTop: 220,
     });
+  });
+
+  it("opens the skill detail drawer without navigating away and does not use return-context helpers on card click", async () => {
+    const saveReturnSpy = vi.spyOn(scrollRestoration, "saveReturnContext");
+
+    renderList();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /查看 frontend-design 的详情/i })
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("skill-detail-drawer")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("drawer-skill:frontend-design")).toBeInTheDocument();
+    expect(screen.queryByText("detail-route")).not.toBeInTheDocument();
+    expect(saveReturnSpy).not.toHaveBeenCalled();
+  });
+
+  it("preserves selected collection and scroll state when closing the drawer and restores focus", async () => {
+    renderList();
+
+    fireEvent.click(screen.getByRole("button", { name: "Backend" }));
+
+    await waitFor(() => {
+      expect(mockLoadCollectionDetail).toHaveBeenCalledWith("col-2");
+    });
+
+    const trigger = screen.getByRole("button", { name: /查看 api-designer 的详情/i });
+    const scroller = trigger.closest("[class*='overflow-auto']");
+    expect(scroller).not.toBeNull();
+    if (!scroller) return;
+    (scroller as HTMLDivElement).scrollTop = 310;
+
+    fireEvent.click(trigger);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("skill-detail-drawer")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /close drawer/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("skill-detail-drawer")).not.toBeInTheDocument();
+    });
+
+    expect(screen.getByRole("button", { name: "Backend" })).toHaveClass("bg-primary/15");
+    expect(screen.getByText("api-designer")).toBeInTheDocument();
+    expect((scroller as HTMLDivElement).scrollTop).toBe(310);
+    expect(trigger).toHaveFocus();
   });
 
   // ── Scroll restoration on return (COLL-RETURN-001) ───────────────────────

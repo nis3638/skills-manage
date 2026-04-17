@@ -23,13 +23,12 @@ import { SkillPickerDialog } from "@/components/collection/SkillPickerDialog";
 import { CollectionInstallDialog } from "@/components/collection/CollectionInstallDialog";
 import { InstallDialog } from "@/components/central/InstallDialog";
 import { UnifiedSkillCard } from "@/components/skill/UnifiedSkillCard";
+import { SkillDetailDrawer } from "@/components/skill/SkillDetailDrawer";
 import { Collection, SkillWithLinks } from "@/types";
 import { cn } from "@/lib/utils";
 import {
   consumeScrollPosition,
-  createScrollRestorationState,
   consumeReturnContext,
-  saveReturnContext,
 } from "@/lib/scrollRestoration";
 
 // Build a stable scroll-restoration key for a given collection id. The
@@ -126,8 +125,11 @@ export function CollectionsListView() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [installTargetSkill, setInstallTargetSkill] = useState<SkillWithLinks | null>(null);
   const [isSingleInstallOpen, setIsSingleInstallOpen] = useState(false);
+  const [drawerSkillId, setDrawerSkillId] = useState<string | null>(null);
+  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const importInputRef = useRef<HTMLInputElement>(null);
   const skillsContainerRef = useRef<HTMLDivElement | null>(null);
+  const detailButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
   // Load collections on mount.
   useEffect(() => {
@@ -215,6 +217,15 @@ export function CollectionsListView() {
 
   function handleSelect(id: string) {
     setSelectedId(id);
+  }
+
+  function setDetailButtonRef(skillId: string, node: HTMLButtonElement | null) {
+    detailButtonRefs.current[skillId] = node;
+  }
+
+  function handleOpenDrawer(skillId: string) {
+    setDrawerSkillId(skillId);
+    setIsDrawerOpen(true);
   }
 
   function handleInstallSingleSkillClick(skillId: string) {
@@ -447,26 +458,8 @@ export function CollectionsListView() {
                           key={skill.id}
                           name={skill.name}
                           description={skill.description}
-                          onDetail={() => {
-                            // Persist the return context in-memory as well so
-                            // the back-navigation path (where location.state
-                            // is null on the restored /collections entry) can
-                            // still re-focus the right collection.
-                            saveReturnContext(COLLECTIONS_RETURN_SCOPE, {
-                              collectionId: selectedId,
-                            });
-                            navigate(`/skill/${skill.id}`, {
-                              state: {
-                                collectionContext: {
-                                  collectionId: selectedId,
-                                },
-                                scrollRestoration: createScrollRestorationState(
-                                  collectionScrollKey(selectedId as string),
-                                  skillsContainerRef.current?.scrollTop ?? 0
-                                ),
-                              },
-                            });
-                          }}
+                          onDetail={() => handleOpenDrawer(skill.id)}
+                          detailButtonRef={(node) => setDetailButtonRef(skill.id, node)}
                           onInstallTo={() => handleInstallSingleSkillClick(skill.id)}
                           onRemove={() => handleRemoveSkill(skill.id)}
                         />
@@ -528,6 +521,24 @@ export function CollectionsListView() {
         skill={installTargetSkill}
         agents={centralAgents}
         onInstall={handleInstallSingleSkill}
+      />
+
+      <SkillDetailDrawer
+        open={isDrawerOpen}
+        skillId={drawerSkillId}
+        onOpenChange={(open) => {
+          setIsDrawerOpen(open);
+          if (!open) {
+            setDrawerSkillId(null);
+          }
+        }}
+        returnFocusRef={
+          drawerSkillId
+            ? {
+                current: detailButtonRefs.current[drawerSkillId] ?? null,
+              }
+            : undefined
+        }
       />
     </div>
   );

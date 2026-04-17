@@ -17,15 +17,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DiscoverConfigDialog } from "@/components/discover/DiscoverConfigDialog";
 import { UnifiedSkillCard } from "@/components/skill/UnifiedSkillCard";
+import { SkillDetailDrawer } from "@/components/skill/SkillDetailDrawer";
 import { InstallDialog } from "@/components/central/InstallDialog";
 import { useDiscoverStore } from "@/stores/discoverStore";
 import { usePlatformStore } from "@/stores/platformStore";
 import { DiscoveredSkill, SkillWithLinks } from "@/types";
 import { cn } from "@/lib/utils";
-import {
-  consumeScrollPosition,
-  createScrollRestorationState,
-} from "@/lib/scrollRestoration";
+import { consumeScrollPosition } from "@/lib/scrollRestoration";
 
 // ─── Empty State ──────────────────────────────────────────────────────────────
 
@@ -99,6 +97,7 @@ export function DiscoverView() {
   const location = useLocation();
   const { projectPath } = useParams<{ projectPath: string }>();
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const detailButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
   // Store state
   const isScanning = useDiscoverStore((s) => s.isScanning);
@@ -122,6 +121,8 @@ export function DiscoverView() {
   const [installTargetSkill, setInstallTargetSkill] =
     useState<DiscoveredSkill | null>(null);
   const [isInstallDialogOpen, setIsInstallDialogOpen] = useState(false);
+  const [drawerSkillId, setDrawerSkillId] = useState<string | null>(null);
+  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [projectSearch, setProjectSearch] = useState("");
   const [skillSearch, setSkillSearch] = useState("");
   const restorationState = location.state?.scrollRestoration as
@@ -332,6 +333,18 @@ export function DiscoverView() {
     },
     [navigate, projectPath]
   );
+
+  const setDetailButtonRef = useCallback(
+    (skillId: string, node: HTMLButtonElement | null) => {
+      detailButtonRefs.current[skillId] = node;
+    },
+    []
+  );
+
+  const handleOpenDrawer = useCallback((skillId: string) => {
+    setDrawerSkillId(skillId);
+    setIsDrawerOpen(true);
+  }, []);
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -555,21 +568,10 @@ export function DiscoverView() {
                       projectBadge={skill.project_name}
                       onDetail={
                         skill.is_already_central
-                          ? () =>
-                              navigate(`/skill/${skill.id}`, {
-                                state: {
-                                  discoverContext: {
-                                    projectPath: selectedProject.project_path,
-                                    skillSearch,
-                                  },
-                                  scrollRestoration: createScrollRestorationState(
-                                    `discover:${selectedProject.project_path}`,
-                                    contentRef.current?.scrollTop ?? 0
-                                  ),
-                                },
-                              })
+                          ? () => handleOpenDrawer(skill.id)
                           : undefined
                       }
+                      detailButtonRef={(node) => setDetailButtonRef(skill.id, node)}
                       onInstallToCentral={() => handleInstallToCentral(skill.id)}
                       onInstallToPlatform={() => handleInstallToPlatform(skill)}
                       isLoading={importingIds.has(skill.id)}
@@ -640,6 +642,24 @@ export function DiscoverView() {
           onInstall={handleInstallFromDialog}
         />
       )}
+
+      <SkillDetailDrawer
+        open={isDrawerOpen}
+        skillId={drawerSkillId}
+        onOpenChange={(open) => {
+          setIsDrawerOpen(open);
+          if (!open) {
+            setDrawerSkillId(null);
+          }
+        }}
+        returnFocusRef={
+          drawerSkillId
+            ? {
+                current: detailButtonRefs.current[drawerSkillId] ?? null,
+              }
+            : undefined
+        }
+      />
     </div>
   );
 }

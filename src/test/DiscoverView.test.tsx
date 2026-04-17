@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { DiscoverView } from "../pages/DiscoverView";
 import { DiscoveredProject, DiscoveredSkill, AgentWithStatus } from "../types";
 import { consumeScrollPosition } from "../lib/scrollRestoration";
+import * as scrollRestoration from "../lib/scrollRestoration";
 
 // Mock stores
 vi.mock("../stores/discoverStore", () => ({
@@ -17,6 +18,33 @@ vi.mock("../stores/platformStore", () => ({
 // Mock the InstallDialog (heavy component with sub-dependencies)
 vi.mock("../components/central/InstallDialog", () => ({
   InstallDialog: () => <div data-testid="install-dialog">InstallDialog</div>,
+}));
+
+vi.mock("../components/skill/SkillDetailDrawer", () => ({
+  SkillDetailDrawer: ({
+    open,
+    skillId,
+    onOpenChange,
+    returnFocusRef,
+  }: {
+    open: boolean;
+    skillId: string | null;
+    onOpenChange: (open: boolean) => void;
+    returnFocusRef?: { current: HTMLElement | null };
+  }) =>
+    open ? (
+      <div data-testid="skill-detail-drawer">
+        <div>drawer-skill:{skillId}</div>
+        <button
+          onClick={() => {
+            onOpenChange(false);
+            returnFocusRef?.current?.focus();
+          }}
+        >
+          Close drawer
+        </button>
+      </div>
+    ) : null,
 }));
 
 // Mock i18next
@@ -357,43 +385,22 @@ describe("DiscoverView", () => {
     expect(screen.getByText("Already in Central")).toBeInTheDocument();
   });
 
-  it("passes discover project context and scroll restoration state when opening detail", async () => {
+  it("opens the skill detail drawer without navigating away or using scroll restoration helpers", async () => {
     const encoded = encodeURIComponent("/home/user/projects/my-app");
+    const saveScrollSpy = vi.spyOn(scrollRestoration, "saveScrollPosition");
+    const location = window.location.pathname;
 
-    render(
-      <MemoryRouter initialEntries={[`/discover/${encoded}`]}>
-        <Routes>
-          <Route path="/discover/:projectPath" element={<DiscoverView />} />
-          <Route path="/skill/:skillId" element={<div>detail-route</div>} />
-        </Routes>
-      </MemoryRouter>
-    );
-
-    const scroller = screen.getByText("deploy").closest("[class*='overflow-auto']");
-    expect(scroller).not.toBeNull();
-    if (!scroller) return;
-
-    Object.defineProperty(scroller, "scrollTop", {
-      value: 210,
-      writable: true,
-      configurable: true,
-    });
+    renderDiscoverView(`/discover/${encoded}`);
 
     fireEvent.click(screen.getByRole("button", { name: /view details for review/i }));
 
     await waitFor(() => {
-      expect(screen.getByText("detail-route")).toBeInTheDocument();
+      expect(screen.getByTestId("skill-detail-drawer")).toBeInTheDocument();
     });
 
-    const historyState = window.history.state?.usr;
-    expect(historyState.discoverContext).toEqual({
-      projectPath: "/home/user/projects/my-app",
-      skillSearch: "",
-    });
-    expect(historyState.scrollRestoration).toEqual({
-      key: "discover:/home/user/projects/my-app",
-      scrollTop: 210,
-    });
+    expect(screen.getByText("drawer-skill:cursor__my-app__review")).toBeInTheDocument();
+    expect(window.location.pathname).toBe(location);
+    expect(saveScrollSpy).not.toHaveBeenCalled();
   });
 
   it("restores discover project scroll after async hydration completes", async () => {
@@ -472,6 +479,34 @@ describe("DiscoverView", () => {
     expect(screen.getAllByTitle("Install to Platform").length).toBeGreaterThan(0);
     expect(screen.getAllByTitle("Install to Central").length).toBe(1);
     expect(screen.getByText("Claude Code")).toBeInTheDocument();
+  });
+
+  it("preserves selected project and right-panel scroll when closing the drawer and restores focus", async () => {
+    const encoded = encodeURIComponent("/home/user/projects/my-app");
+    renderDiscoverView(`/discover/${encoded}`);
+
+    const trigger = screen.getByRole("button", { name: /view details for review/i });
+    const scroller = trigger.closest("[class*='overflow-auto']");
+    expect(scroller).not.toBeNull();
+    if (!scroller) return;
+    (scroller as HTMLDivElement).scrollTop = 275;
+
+    fireEvent.click(trigger);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("skill-detail-drawer")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /close drawer/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("skill-detail-drawer")).not.toBeInTheDocument();
+    });
+
+    expect(screen.getAllByText("my-app").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("review")).toBeInTheDocument();
+    expect((scroller as HTMLDivElement).scrollTop).toBe(275);
+    expect(trigger).toHaveFocus();
   });
 
   // ── Selection ──────────────────────────────────────────────────────────────
