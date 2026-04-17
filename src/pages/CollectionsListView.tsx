@@ -10,7 +10,7 @@ import {
   Download,
   PackagePlus,
 } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 
@@ -25,12 +25,32 @@ import { InstallDialog } from "@/components/central/InstallDialog";
 import { UnifiedSkillCard } from "@/components/skill/UnifiedSkillCard";
 import { Collection, SkillWithLinks } from "@/types";
 import { cn } from "@/lib/utils";
+import {
+  consumeScrollPosition,
+  createScrollRestorationState,
+  consumeReturnContext,
+  saveReturnContext,
+} from "@/lib/scrollRestoration";
+
+// Build a stable scroll-restoration key for a given collection id. The
+// returned key scopes restoration state to that specific collection so that
+// returning to the collections list only restores scroll if the user is still
+// looking at the same collection context they originally left from.
+function collectionScrollKey(collectionId: string): string {
+  return `collection:${collectionId}`;
+}
+
+// Shared scope for the "collections" return-context map. Kept as a constant
+// so the forward (CollectionsListView emit) and return (this view mounting)
+// sides always agree on the key.
+const COLLECTIONS_RETURN_SCOPE = "collections";
 
 // ─── CollectionsListView ─────────────────────────────────────────────────────
 
 export function CollectionsListView() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const location = useLocation();
 
   // Collection store
   const collections = useCollectionStore((s) => s.collections);
@@ -55,8 +75,50 @@ export function CollectionsListView() {
   const loadCentralSkills = useCentralSkillsStore((s) => s.loadCentralSkills);
   const installCentralSkill = useCentralSkillsStore((s) => s.installSkill);
 
-  // Local state
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Restoration context supplied via navigation state when returning from a
+  // skill detail. `collectionContext` identifies the collection we should
+  // re-focus; `scrollRestoration` carries the prior skill-list scroll offset.
+  //
+  // React Router preserves `location.state` across `navigate(-1)` only when
+  // the previous history entry was originally pushed *with* state. Entering
+  // /collections from the sidebar has no state, so on back-navigation we
+  // also consult the in-memory return-context map populated by the forward
+  // link. Consuming the fallback map is done lazily (inside useState's
+  // initializer) so it fires exactly once on mount.
+  const locationCollectionContext = location.state?.collectionContext as
+    | { collectionId?: string }
+    | undefined;
+  const locationRestorationState = location.state?.scrollRestoration as
+    | { key?: string; scrollTop?: number }
+    | undefined;
+
+  // Local state. When a collection context was restored from navigation state
+  // (either via location.state on entry, or via the in-memory return-context
+  // map on back-navigation) we seed `selectedId` with it so the
+  // auto-select-first-collection effect below does not override the user's
+  // prior focus while data is loading.
+  const [selectedId, setSelectedId] = useState<string | null>(() => {
+    if (locationCollectionContext?.collectionId) {
+      return locationCollectionContext.collectionId;
+    }
+    const fallback = consumeReturnContext(COLLECTIONS_RETURN_SCOPE);
+    if (fallback && typeof fallback.collectionId === "string") {
+      return fallback.collectionId;
+    }
+    return null;
+  });
+  // Synthesise a scroll-restoration entry from the initial selectedId so the
+  // restoration effect below can pull the saved offset out of the in-memory
+  // scroll map even when the back-navigation replays a state-less /collections
+  // history entry.
+  const [fallbackRestorationKey] = useState<string | null>(() =>
+    selectedId && !locationRestorationState
+      ? collectionScrollKey(selectedId)
+      : null
+  );
+  const restorationState: { key?: string; scrollTop?: number } | undefined =
+    locationRestorationState ??
+    (fallbackRestorationKey ? { key: fallbackRestorationKey } : undefined);
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [isEditOpen, setIsEditOpen] = useState(false);
   const [isPickerOpen, setIsPickerOpen] = useState(false);
@@ -65,6 +127,7 @@ export function CollectionsListView() {
   const [installTargetSkill, setInstallTargetSkill] = useState<SkillWithLinks | null>(null);
   const [isSingleInstallOpen, setIsSingleInstallOpen] = useState(false);
   const importInputRef = useRef<HTMLInputElement>(null);
+  const skillsContainerRef = useRef<HTMLDivElement | null>(null);
 
   // Load collections on mount.
   useEffect(() => {
@@ -72,8 +135,23 @@ export function CollectionsListView() {
   }, [loadCollections]);
 
   // Auto-select first collection when none is selected.
+  // If we previously seeded selectedId from location.state or the in-memory
+  // return-context map, selectedId is already truthy on first render so this
+  // effect becomes a no-op and the restored focus is preserved.
   useEffect(() => {
     if (!selectedId && collections.length > 0) {
+      setSelectedId(collections[0].id);
+    }
+  }, [selectedId, collections]);
+
+  // If the restored collection id no longer exists (e.g. the collection was
+  // deleted in another tab while the user was reading a skill detail), fall
+  // back to the first available collection so the user still sees something
+  // useful instead of an empty shell.
+  useEffect(() => {
+    if (!selectedId || collections.length === 0) return;
+    const stillExists = collections.some((c) => c.id === selectedId);
+    if (!stillExists) {
       setSelectedId(collections[0].id);
     }
   }, [selectedId, collections]);
@@ -91,6 +169,47 @@ export function CollectionsListView() {
       loadCentralSkills();
     }
   }, [centralSkills.length, loadCentralSkills]);
+
+  // Scroll restoration: once the collection detail for the currently
+  // selected collection has finished hydrating, restore the previously
+  // recorded skill-list scroll offset. We only run after the detail matches
+  // our selected id so we never restore onto the wrong collection's list.
+  //
+  // We prefer the in-memory scroll map (populated by SkillDetail's back
+  // handler on the real list → detail → back flow) and fall back to the
+  // `scrollTop` that was packed directly into `location.state`, which
+  // covers tests plus any host that does not preserve state across the
+  // back navigation. Restoration remains stable when the collection's
+  // membership has changed but the context is still valid — we do not
+  // require an exact skill-count match, only a matching collection id.
+  //
+  // After a successful restore we clear the navigation state so that later
+  // interactions (removing a skill, scrolling, switching collections and
+  // returning) can't re-apply the stale offset.
+  useEffect(() => {
+    if (!selectedId) return;
+    if (!currentDetail || currentDetail.id !== selectedId) return;
+    if (!restorationState?.key) return;
+    if (restorationState.key !== collectionScrollKey(selectedId)) return;
+    const container = skillsContainerRef.current;
+    if (!container) return;
+
+    let scrollTop = consumeScrollPosition(restorationState.key);
+    if (scrollTop === null && typeof restorationState.scrollTop === "number") {
+      scrollTop = restorationState.scrollTop;
+    }
+    if (scrollTop === null) return;
+
+    container.scrollTop = scrollTop;
+    navigate(location.pathname, { replace: true, state: null });
+  }, [
+    selectedId,
+    currentDetail,
+    restorationState?.key,
+    restorationState?.scrollTop,
+    navigate,
+    location.pathname,
+  ]);
 
   // ── Handlers ───────────────────────────────────────────────────────────────
 
@@ -308,7 +427,7 @@ export function CollectionsListView() {
                 </div>
 
                 {/* Skills list */}
-                <div className="flex-1 overflow-auto">
+                <div ref={skillsContainerRef} className="flex-1 overflow-auto">
                   {currentDetail.skills.length === 0 ? (
                     <div className="flex flex-col items-center justify-center h-full gap-4 py-20">
                       <div className="p-4 rounded-full bg-muted/60">
@@ -328,7 +447,26 @@ export function CollectionsListView() {
                           key={skill.id}
                           name={skill.name}
                           description={skill.description}
-                          onDetail={() => navigate(`/skill/${skill.id}`)}
+                          onDetail={() => {
+                            // Persist the return context in-memory as well so
+                            // the back-navigation path (where location.state
+                            // is null on the restored /collections entry) can
+                            // still re-focus the right collection.
+                            saveReturnContext(COLLECTIONS_RETURN_SCOPE, {
+                              collectionId: selectedId,
+                            });
+                            navigate(`/skill/${skill.id}`, {
+                              state: {
+                                collectionContext: {
+                                  collectionId: selectedId,
+                                },
+                                scrollRestoration: createScrollRestorationState(
+                                  collectionScrollKey(selectedId as string),
+                                  skillsContainerRef.current?.scrollTop ?? 0
+                                ),
+                              },
+                            });
+                          }}
                           onInstallTo={() => handleInstallSingleSkillClick(skill.id)}
                           onRemove={() => handleRemoveSkill(skill.id)}
                         />

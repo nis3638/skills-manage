@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useLocation } from "react-router-dom";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import {
@@ -23,12 +23,23 @@ import { SkillPickerDialog } from "@/components/collection/SkillPickerDialog";
 import { CollectionInstallDialog } from "@/components/collection/CollectionInstallDialog";
 import { InstallDialog } from "@/components/central/InstallDialog";
 import { SkillWithLinks } from "@/types";
+import {
+  consumeScrollPosition,
+  createScrollRestorationState,
+} from "@/lib/scrollRestoration";
+
+// Scroll-restoration key shared with `CollectionsListView` so list-level and
+// single-collection pages interoperate under the same restoration contract.
+function collectionScrollKey(collectionId: string): string {
+  return `collection:${collectionId}`;
+}
 
 // ─── CollectionView ───────────────────────────────────────────────────────────
 
 export function CollectionView() {
   const { collectionId } = useParams<{ collectionId: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const { t } = useTranslation();
 
   const currentDetail = useCollectionStore((s) => s.currentDetail);
@@ -61,6 +72,23 @@ export function CollectionView() {
   const [installTargetSkill, setInstallTargetSkill] = useState<SkillWithLinks | null>(null);
   const [isSingleInstallOpen, setIsSingleInstallOpen] = useState(false);
   const importInputRef = useRef<HTMLInputElement>(null);
+  const skillsContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Restoration state carried through navigation when returning from a skill
+  // detail. The context is already present in the URL (collectionId), but the
+  // scroll offset needs to be re-applied after data hydrates.
+  //
+  // React Router preserves `location.state` across `navigate(-1)` only when
+  // the previous history entry was pushed *with* state. Entering
+  // /collection/:id from the sidebar or list view has no state, so on
+  // back-navigation we also rely on the in-memory scroll map, synthesising a
+  // restoration entry keyed on the current collectionId.
+  const locationRestorationState = location.state?.scrollRestoration as
+    | { key?: string; scrollTop?: number }
+    | undefined;
+  const restorationState: { key?: string; scrollTop?: number } | undefined =
+    locationRestorationState ??
+    (collectionId ? { key: collectionScrollKey(collectionId) } : undefined);
 
   async function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -89,6 +117,38 @@ export function CollectionView() {
       loadCentralSkills();
     }
   }, [centralSkills.length, loadCentralSkills]);
+
+  // Scroll restoration: once the collection detail for this route's
+  // collectionId has finished hydrating, restore the previously recorded
+  // skill-list scroll offset. We prefer the in-memory map populated by
+  // SkillDetail's back handler, and fall back to the `scrollTop` packed into
+  // `location.state` for tests/hosts that don't preserve state through back
+  // navigation. After a successful restore we clear the navigation state so
+  // that later interactions can't re-apply the stale offset.
+  useEffect(() => {
+    if (!collectionId) return;
+    if (!currentDetail || currentDetail.id !== collectionId) return;
+    if (!restorationState?.key) return;
+    if (restorationState.key !== collectionScrollKey(collectionId)) return;
+    const container = skillsContainerRef.current;
+    if (!container) return;
+
+    let scrollTop = consumeScrollPosition(restorationState.key);
+    if (scrollTop === null && typeof restorationState.scrollTop === "number") {
+      scrollTop = restorationState.scrollTop;
+    }
+    if (scrollTop === null) return;
+
+    container.scrollTop = scrollTop;
+    navigate(location.pathname, { replace: true, state: null });
+  }, [
+    collectionId,
+    currentDetail,
+    restorationState?.key,
+    restorationState?.scrollTop,
+    navigate,
+    location.pathname,
+  ]);
 
   function handleInstallSingleSkillClick(skillId: string) {
     const target = centralSkills.find((s) => s.id === skillId);
@@ -306,7 +366,7 @@ export function CollectionView() {
       </div>
 
       {/* Skills list */}
-      <div className="flex-1 overflow-auto">
+      <div ref={skillsContainerRef} className="flex-1 overflow-auto">
         {currentDetail.skills.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full gap-4 py-20">
             <div className="p-4 rounded-full bg-muted/60">
@@ -332,7 +392,19 @@ export function CollectionView() {
                 key={skill.id}
                 name={skill.name}
                 description={skill.description}
-                onDetail={() => navigate(`/skill/${skill.id}`)}
+                onDetail={() =>
+                  navigate(`/skill/${skill.id}`, {
+                    state: {
+                      collectionContext: {
+                        collectionId: currentDetail.id,
+                      },
+                      scrollRestoration: createScrollRestorationState(
+                        collectionScrollKey(currentDetail.id),
+                        skillsContainerRef.current?.scrollTop ?? 0
+                      ),
+                    },
+                  })
+                }
                 onInstallTo={() => handleInstallSingleSkillClick(skill.id)}
                 onRemove={() => handleRemoveSkill(skill.id)}
               />

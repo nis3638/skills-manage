@@ -1,8 +1,34 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { useEffect } from "react";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import {
+  MemoryRouter,
+  Route,
+  Routes,
+  useLocation,
+  type Location,
+} from "react-router-dom";
 import { CollectionView } from "../pages/CollectionView";
 import { CollectionDetail, AgentWithStatus } from "../types";
+import {
+  consumeScrollPosition,
+  saveScrollPosition,
+} from "../lib/scrollRestoration";
+
+// Subscribes to location changes so tests can assert on navigation state
+// without depending on `window.history.state`, which MemoryRouter does not
+// update.
+function LocationProbe({
+  onChange,
+}: {
+  onChange: (location: Location) => void;
+}) {
+  const location = useLocation();
+  useEffect(() => {
+    onChange(location);
+  }, [location, onChange]);
+  return null;
+}
 
 // Mock stores
 vi.mock("../stores/collectionStore", () => ({
@@ -78,6 +104,8 @@ const mockLoadCollectionDetail = vi.fn();
 const mockRemoveSkillFromCollection = vi.fn();
 const mockDeleteCollection = vi.fn();
 const mockExportCollection = vi.fn();
+const mockUseCollectionStore = vi.mocked(useCollectionStore);
+const mockUsePlatformStore = vi.mocked(usePlatformStore);
 
 function buildCollectionStoreState(overrides = {}) {
   return {
@@ -116,10 +144,10 @@ function buildPlatformStoreState(overrides = {}) {
 }
 
 function renderCollectionView(collectionId = "col-1", storeOverrides = {}) {
-  vi.mocked(useCollectionStore).mockImplementation((selector) =>
+  mockUseCollectionStore.mockImplementation((selector) =>
     selector(buildCollectionStoreState(storeOverrides))
   );
-  vi.mocked(usePlatformStore).mockImplementation((selector) =>
+  mockUsePlatformStore.mockImplementation((selector) =>
     selector(buildPlatformStoreState())
   );
 
@@ -229,5 +257,227 @@ describe("CollectionView", () => {
       error: "Collection not found",
     });
     expect(screen.getByText(/Collection not found/i)).toBeInTheDocument();
+  });
+
+  // ── Return-position restoration ───────────────────────────────────────────
+
+  describe("scroll restoration", () => {
+    afterEach(() => {
+      // Clear any leftover scroll map entries between tests.
+      consumeScrollPosition("collection:col-1");
+      consumeScrollPosition("collection:col-2");
+    });
+
+    type InitialEntry =
+      | string
+      | {
+          pathname: string;
+          state?: unknown;
+          search?: string;
+          hash?: string;
+        };
+
+    function renderWithState(
+      initialEntry: InitialEntry,
+      storeOverrides: Record<string, unknown> = {},
+      onLocationChange?: (location: Location) => void
+    ) {
+      mockUseCollectionStore.mockImplementation((selector) =>
+        selector(buildCollectionStoreState(storeOverrides))
+      );
+      mockUsePlatformStore.mockImplementation((selector) =>
+        selector(buildPlatformStoreState())
+      );
+
+      return render(
+        <MemoryRouter initialEntries={[initialEntry]}>
+          {onLocationChange && (
+            <LocationProbe onChange={onLocationChange} />
+          )}
+          <Routes>
+            <Route path="/collection/:collectionId" element={<CollectionView />} />
+            <Route path="/skill/:skillId" element={<div>detail-route</div>} />
+          </Routes>
+        </MemoryRouter>
+      );
+    }
+
+    it("navigates to skill detail with collection context and scroll restoration state", async () => {
+      const locations: Location[] = [];
+      renderWithState(`/collection/col-1`, {}, (loc) => {
+        locations.push(loc);
+      });
+
+      // Locate the scroll container and fake a scroll offset.
+      const scroller = screen
+        .getByText("frontend-design")
+        .closest("[class*='overflow-auto']");
+      expect(scroller).not.toBeNull();
+      if (!scroller) return;
+      Object.defineProperty(scroller, "scrollTop", {
+        value: 180,
+        writable: true,
+        configurable: true,
+      });
+
+      fireEvent.click(
+        screen.getByRole("button", { name: /查看 frontend-design 的详情/i })
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("detail-route")).toBeInTheDocument();
+      });
+
+      const detailLocation = locations.find((l) =>
+        l.pathname.startsWith("/skill/")
+      );
+      expect(detailLocation).toBeDefined();
+      const state = detailLocation?.state as
+        | {
+            collectionContext?: { collectionId?: string };
+            scrollRestoration?: { key?: string; scrollTop?: number };
+          }
+        | null
+        | undefined;
+      expect(state?.collectionContext).toEqual({ collectionId: "col-1" });
+      expect(state?.scrollRestoration).toEqual({
+        key: "collection:col-1",
+        scrollTop: 180,
+      });
+    });
+
+    it("restores scroll position from the in-memory map after data hydrates", async () => {
+      // Simulate what SkillDetail.handleGoBack does before navigating back.
+      saveScrollPosition("collection:col-1", 420);
+
+      renderWithState({
+        pathname: "/collection/col-1",
+        state: {
+          collectionContext: { collectionId: "col-1" },
+          scrollRestoration: { key: "collection:col-1", scrollTop: 0 },
+        },
+      });
+
+      const scroller = screen
+        .getByText("frontend-design")
+        .closest("[class*='overflow-auto']");
+      expect(scroller).not.toBeNull();
+      if (!scroller) return;
+
+      await waitFor(() => {
+        expect((scroller as HTMLDivElement).scrollTop).toBe(420);
+      });
+      // Map should have been consumed after restoration.
+      expect(consumeScrollPosition("collection:col-1")).toBeNull();
+    });
+
+    it("falls back to location.state.scrollTop when the in-memory map is empty", async () => {
+      renderWithState({
+        pathname: "/collection/col-1",
+        state: {
+          collectionContext: { collectionId: "col-1" },
+          scrollRestoration: { key: "collection:col-1", scrollTop: 360 },
+        },
+      });
+
+      const scroller = screen
+        .getByText("frontend-design")
+        .closest("[class*='overflow-auto']");
+      expect(scroller).not.toBeNull();
+      if (!scroller) return;
+
+      await waitFor(() => {
+        expect((scroller as HTMLDivElement).scrollTop).toBe(360);
+      });
+    });
+
+    it("does not restore scroll when the restoration key targets a different collection", async () => {
+      // The stored key points at col-2 but the route is col-1 — this should be
+      // ignored so we don't cross-contaminate other collection contexts.
+      renderWithState({
+        pathname: "/collection/col-1",
+        state: {
+          collectionContext: { collectionId: "col-2" },
+          scrollRestoration: { key: "collection:col-2", scrollTop: 999 },
+        },
+      });
+
+      const scroller = screen
+        .getByText("frontend-design")
+        .closest("[class*='overflow-auto']");
+      expect(scroller).not.toBeNull();
+      if (!scroller) return;
+
+      // Give the effect an opportunity to run — scrollTop should remain 0.
+      await waitFor(() => {
+        expect((scroller as HTMLDivElement).scrollTop).toBe(0);
+      });
+    });
+
+    it("restoration remains stable when collection membership changes", async () => {
+      // Simulate the case where, while the user was on skill detail, the
+      // collection gained a new skill. The stored key still matches the
+      // collection id, so restoration should proceed even though the skill
+      // list length differs from what it was on navigation-away.
+      const detailWithNewSkill: CollectionDetail = {
+        ...mockCollectionDetail,
+        skills: [
+          ...mockCollectionDetail.skills,
+          {
+            id: "late-arrival",
+            name: "late-arrival",
+            description: "Added while user was away",
+            file_path: "~/.agents/skills/late-arrival/SKILL.md",
+            is_central: true,
+            scanned_at: "2026-04-09T00:00:00Z",
+          },
+        ],
+      };
+
+      renderWithState(
+        {
+          pathname: "/collection/col-1",
+          state: {
+            collectionContext: { collectionId: "col-1" },
+            scrollRestoration: { key: "collection:col-1", scrollTop: 240 },
+          },
+        },
+        { currentDetail: detailWithNewSkill }
+      );
+
+      const scroller = screen
+        .getByText("frontend-design")
+        .closest("[class*='overflow-auto']");
+      expect(scroller).not.toBeNull();
+      if (!scroller) return;
+
+      await waitFor(() => {
+        expect((scroller as HTMLDivElement).scrollTop).toBe(240);
+      });
+      // And the newly-added skill is still rendered — context is valid.
+      expect(screen.getByText("late-arrival")).toBeInTheDocument();
+    });
+
+    it("restores scroll from the in-memory map on back-navigation when location.state is null", async () => {
+      // Simulate SkillDetail.handleGoBack: it saves the scroll position under
+      // the collection's key, then navigates back. React Router replays the
+      // original /collection/col-1 entry which had no state attached, so the
+      // view mounts with location.state === null. Restoration must still
+      // succeed because the scroll map still holds the offset keyed by
+      // collection id.
+      saveScrollPosition("collection:col-1", 280);
+
+      renderWithState("/collection/col-1");
+
+      const scroller = screen
+        .getByText("frontend-design")
+        .closest("[class*='overflow-auto']");
+      expect(scroller).not.toBeNull();
+      if (!scroller) return;
+
+      await waitFor(() => {
+        expect((scroller as HTMLDivElement).scrollTop).toBe(280);
+      });
+    });
   });
 });
