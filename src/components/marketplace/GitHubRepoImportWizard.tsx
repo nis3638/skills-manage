@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
+  ChevronRight,
   ExternalLink,
   GitBranch,
   Loader2,
@@ -112,6 +113,7 @@ export function GitHubRepoImportWizard({
   const [selectionState, setSelectionState] = useState<Record<string, SelectionState>>({});
   const [postImportTargetSkillId, setPostImportTargetSkillId] = useState<string | null>(null);
   const [selectedSkillPath, setSelectedSkillPath] = useState<string | null>(null);
+  const [detailTab, setDetailTab] = useState<"overview" | "explanation" | "options">("overview");
   const detailScrollRef = useRef<HTMLDivElement | null>(null);
   const browserMode = !isTauriRuntime();
 
@@ -121,6 +123,7 @@ export function GitHubRepoImportWizard({
       setSelectionState({});
       setPostImportTargetSkillId(null);
       setSelectedSkillPath(null);
+      setDetailTab("overview");
       return;
     }
     if (importResult) {
@@ -191,6 +194,12 @@ export function GitHubRepoImportWizard({
   useEffect(() => {
     if (step === "preview") {
       detailScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    }
+  }, [selectedSkillPath, step]);
+
+  useEffect(() => {
+    if (step === "preview") {
+      setDetailTab("overview");
     }
   }, [selectedSkillPath, step]);
 
@@ -373,42 +382,47 @@ export function GitHubRepoImportWizard({
   function renderPreviewToolbar(currentPreview: GitHubRepoPreview) {
     return (
       <div
-        className="mt-4 rounded-xl border border-border/70 bg-muted/10 p-4"
+        className="mt-2 rounded-xl border border-border/60 bg-muted/10 px-4 py-2.5"
         data-testid="github-import-repo-toolbar"
       >
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+        <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1.5">
+          <div className="min-w-0 flex-1 space-y-1.5">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">
                 {t("marketplace.githubImportToolbarLabel")}
               </span>
-              <span className="text-sm font-semibold">
+              <span className="truncate text-sm font-semibold">
                 {currentPreview.repo.owner}/{currentPreview.repo.repo}
               </span>
               {currentPreview.repo.branch ? (
-                <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
                   {currentPreview.repo.branch}
                 </span>
               ) : null}
             </div>
-            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
               <span>{t("marketplace.githubImportFoundSkills", { count: currentPreview.skills.length })}</span>
               <span>{t("marketplace.githubImportToolbarSelected", { count: selectedSkills.length })}</span>
-              <span className="truncate">{currentPreview.repo.normalizedUrl}</span>
+              <span className="truncate text-muted-foreground/90">{currentPreview.repo.normalizedUrl}</span>
             </div>
           </div>
 
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2 self-start">
             <a
               href={previewToolbarRepoHref ?? "#"}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+              className="inline-flex h-7 items-center gap-1 rounded-md border border-border bg-background px-3 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
             >
               <ExternalLink className="size-3.5" />
               <span>{t("marketplace.previewOpenSource")}</span>
             </a>
-            <Button variant="outline" onClick={handlePreviewSubmit} disabled={isPreviewLoading || !repoUrl.trim()}>
+            <Button
+              variant="outline"
+              className="h-7"
+              onClick={handlePreviewSubmit}
+              disabled={isPreviewLoading || !repoUrl.trim()}
+            >
               {isPreviewLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
               <span>{t("marketplace.githubImportRepreview")}</span>
             </Button>
@@ -421,34 +435,72 @@ export function GitHubRepoImportWizard({
   return (
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent className={dialogContentClassName}>
-        <div className="shrink-0 border-b border-border/70 px-6 pb-4 pt-6">
+        <div
+          className="shrink-0 border-b border-border/70 px-6 pb-2.5 pt-4"
+          data-testid="github-import-compact-header"
+        >
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <GitBranch className="size-5" />
-              <span>{t("marketplace.githubImportTitle")}</span>
-            </DialogTitle>
-            <DialogDescription>
-              {t("marketplace.githubImportDesc", { launcher: launcherLabel })}
-            </DialogDescription>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <DialogTitle className="flex items-center gap-2 text-[1.05rem]">
+                  <GitBranch className="size-5" />
+                  <span>{t("marketplace.githubImportTitle")}</span>
+                </DialogTitle>
+                <DialogDescription className="mt-0.5 text-xs leading-5 text-muted-foreground">
+                  {t("marketplace.githubImportDesc", { launcher: launcherLabel })}
+                </DialogDescription>
+              </div>
+              <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                <span className="rounded-full border border-border/70 bg-muted/20 px-2.5 py-1 font-medium">
+                  {t("marketplace.githubImportHeaderLauncher", { launcher: launcherLabel })}
+                </span>
+              </div>
+            </div>
           </DialogHeader>
 
-          <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            {(["input", "preview", "confirm", "result"] as WizardStep[]).map((item, index) => (
-              <div key={item} className="flex items-center gap-2">
-                <div
-                  className={cn(
-                    "flex size-6 items-center justify-center rounded-full border text-[11px] font-medium",
-                    step === item || (item === "preview" && step === "confirm")
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-border bg-muted/30 text-muted-foreground"
-                  )}
-                >
-                  {index + 1}
+          <div
+            className="mt-2 flex items-center gap-2 overflow-x-auto pb-1 text-[11px] text-muted-foreground"
+            data-testid="github-import-flat-stepper"
+          >
+            {(["input", "preview", "confirm", "result"] as WizardStep[]).map((item, index) => {
+              const isActive = step === item || (item === "preview" && step === "confirm");
+              const isComplete = (["input", "preview", "confirm", "result"] as WizardStep[]).indexOf(step) > index;
+
+              return (
+                <div key={item} className="flex min-w-[11rem] flex-1 items-center gap-2">
+                  <div
+                    className={cn(
+                      "flex min-w-0 flex-1 items-center gap-2 rounded-full border px-3 py-1 shadow-sm",
+                      isActive
+                        ? "border-primary/40 bg-primary/10 text-primary"
+                        : isComplete
+                          ? "border-primary/20 bg-primary/5 text-primary/80"
+                          : "border-border/70 bg-muted/20 text-muted-foreground"
+                    )}
+                  >
+                    <span
+                      className={cn(
+                          "flex size-4.5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold",
+                        isActive || isComplete
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-background text-muted-foreground"
+                      )}
+                    >
+                      {index + 1}
+                    </span>
+                    <span className="truncate font-medium">{t(`marketplace.githubImportStep.${item}`)}</span>
+                  </div>
+                  {index < 3 ? (
+                    <div
+                      className={cn(
+                        "h-px min-w-8 flex-1 bg-border/80",
+                        isComplete ? "bg-primary/40" : "bg-border/80"
+                      )}
+                    />
+                  ) : null}
                 </div>
-                <span>{t(`marketplace.githubImportStep.${item}`)}</span>
-                {index < 3 ? <span>→</span> : null}
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {showPreviewWorkspace && preview ? renderPreviewToolbar(preview) : renderUrlInputBlock()}
@@ -869,6 +921,33 @@ export function GitHubRepoImportWizard({
                           <div className="mt-2 break-all text-xs text-muted-foreground">
                             {selectedPreviewSkill.sourcePath}
                           </div>
+                          <div
+                            className="mt-4 flex flex-wrap gap-2"
+                            data-testid="github-import-detail-tabs"
+                          >
+                            {(
+                              [
+                                ["overview", t("marketplace.githubImportDetailTabs.overview")],
+                                ["explanation", t("marketplace.githubImportDetailTabs.explanation")],
+                                ["options", t("marketplace.githubImportDetailTabs.options")],
+                              ] as const
+                            ).map(([tabId, label]) => (
+                              <button
+                                key={tabId}
+                                type="button"
+                                onClick={() => setDetailTab(tabId)}
+                                className={cn(
+                                  "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
+                                  detailTab === tabId
+                                    ? "border-primary/40 bg-primary/10 text-primary"
+                                    : "border-border/70 bg-muted/20 text-muted-foreground hover:text-foreground"
+                                )}
+                                data-testid={`github-import-detail-tab-${tabId}`}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
                         </div>
 
                         <div
@@ -876,116 +955,164 @@ export function GitHubRepoImportWizard({
                           className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4"
                           data-testid="github-import-detail-scroll"
                         >
-                          <div className="space-y-2">
-                            <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                              {t("marketplace.githubImportSkillDescription")}
-                            </div>
-                            <p className="whitespace-pre-wrap text-sm leading-6 text-foreground">
-                              {selectedPreviewSkill.description ||
-                                t("marketplace.githubImportNoDescription")}
-                            </p>
-                          </div>
+                          {detailTab === "overview" ? (
+                            <div
+                              className="space-y-5"
+                              data-testid="github-import-detail-panel-overview"
+                            >
+                              <div className="space-y-2">
+                                <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                                  {t("marketplace.githubImportSkillDescription")}
+                                </div>
+                                <p className="whitespace-pre-wrap text-sm leading-6 text-foreground">
+                                  {selectedPreviewSkill.description ||
+                                    t("marketplace.githubImportNoDescription")}
+                                </p>
+                              </div>
 
-                          <div className="grid gap-3 text-sm sm:grid-cols-2">
-                            <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
-                              <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                                {t("marketplace.githubImportSkillFolder")}
-                              </div>
-                              <div className="mt-2 break-all text-sm">
-                                {selectedPreviewSkill.skillDirectoryName}
+                              <div className="grid gap-3 text-sm sm:grid-cols-2">
+                                <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
+                                  <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                                    {t("marketplace.githubImportSkillFolder")}
+                                  </div>
+                                  <div className="mt-2 break-all text-sm">
+                                    {selectedPreviewSkill.skillDirectoryName}
+                                  </div>
+                                </div>
+                                <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
+                                  <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                                    {t("marketplace.githubImportRootDirectory")}
+                                  </div>
+                                  <div className="mt-2 break-all text-sm">
+                                    {selectedPreviewSkill.rootDirectory || "."}
+                                  </div>
+                                </div>
                               </div>
                             </div>
-                            <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
-                              <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                                {t("marketplace.githubImportRootDirectory")}
-                              </div>
-                              <div className="mt-2 break-all text-sm">
-                                {selectedPreviewSkill.rootDirectory || "."}
-                              </div>
-                            </div>
-                          </div>
+                          ) : null}
 
-                          <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
-                            <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                              {t("marketplace.githubImportSelectionToggle")}
+                          {detailTab === "explanation" ? (
+                            <div
+                              className="space-y-4"
+                              data-testid="github-import-detail-panel-explanation"
+                            >
+                              <div className="rounded-lg border border-border/70 bg-muted/20 p-4">
+                                <div className="flex items-center gap-2 text-sm font-medium">
+                                  <Sparkles className="size-4 text-primary" />
+                                  <span>{t("marketplace.githubImportAiSummaryTitle")}</span>
+                                </div>
+                                <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                                  {selectedPreviewSkill.description
+                                    ? t("marketplace.githubImportAiSummaryBody", {
+                                        name: selectedPreviewSkill.skillName,
+                                        description: selectedPreviewSkill.description,
+                                      })
+                                    : t("marketplace.githubImportAiSummaryFallback", {
+                                        name: selectedPreviewSkill.skillName,
+                                      })}
+                                </p>
+                              </div>
                             </div>
-                            <label className="mt-3 flex items-center gap-3 text-sm">
-                              <input
-                                aria-label={t("marketplace.selectSkill")}
-                                type="checkbox"
-                                checked={
-                                  selectionState[selectedPreviewSkill.sourcePath]?.selected ?? true
-                                }
-                                onChange={(event) =>
-                                  updateSelection(selectedPreviewSkill, {
-                                    selected: event.target.checked,
-                                  })
-                                }
-                              />
-                              <span>
-                                {t("marketplace.githubImportSelectCurrentSkill")}
-                              </span>
-                            </label>
-                          </div>
+                          ) : null}
 
-                          {(selectionState[selectedPreviewSkill.sourcePath]?.selected ?? true) &&
-                          selectedPreviewSkill.conflict ? (
-                            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
-                              <div className="text-sm font-medium text-amber-700 dark:text-amber-300">
-                                {t("marketplace.conflictWithExisting", {
-                                  name: selectedPreviewSkill.conflict.existingName,
-                                })}
-                              </div>
-                              <div className="mt-3 grid gap-2 md:grid-cols-3">
-                                {(["overwrite", "skip", "rename"] as DuplicateResolution[]).map(
-                                  (option) => (
-                                    <label
-                                      key={option}
-                                      className={cn(
-                                        "flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm",
-                                        (selectionState[selectedPreviewSkill.sourcePath]?.resolution ??
-                                          "skip") === option
-                                          ? "border-primary bg-primary/10"
-                                          : "border-border bg-background"
-                                      )}
-                                    >
-                                      <input
-                                        type="radio"
-                                        name={`resolution-${selectedPreviewSkill.sourcePath}`}
-                                        checked={
-                                          (selectionState[selectedPreviewSkill.sourcePath]
-                                            ?.resolution ?? "skip") === option
-                                        }
-                                        onChange={() =>
-                                          updateSelection(selectedPreviewSkill, {
-                                            resolution: option,
-                                          })
-                                        }
-                                      />
-                                      <span>
-                                        {t(`marketplace.duplicateResolution.${option}`)}
-                                      </span>
-                                    </label>
-                                  )
-                                )}
-                              </div>
-                              {(selectionState[selectedPreviewSkill.sourcePath]?.resolution ??
-                                "skip") === "rename" ? (
-                                <div className="mt-3">
-                                  <Input
-                                    value={
-                                      selectionState[selectedPreviewSkill.sourcePath]
-                                        ?.renamedSkillId ?? selectedPreviewSkill.skillId
+                          {detailTab === "options" ? (
+                            <div
+                              className="space-y-5"
+                              data-testid="github-import-detail-panel-options"
+                            >
+                              <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
+                                <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                                  {t("marketplace.githubImportSelectionToggle")}
+                                </div>
+                                <label className="mt-3 flex items-center gap-3 text-sm">
+                                  <input
+                                    aria-label={t("marketplace.selectSkill")}
+                                    type="checkbox"
+                                    checked={
+                                      selectionState[selectedPreviewSkill.sourcePath]?.selected ?? true
                                     }
                                     onChange={(event) =>
                                       updateSelection(selectedPreviewSkill, {
-                                        renamedSkillId: event.target.value,
+                                        selected: event.target.checked,
                                       })
                                     }
-                                    placeholder={t("marketplace.renameSkillIdPlaceholder")}
                                   />
+                                  <span>
+                                    {t("marketplace.githubImportSelectCurrentSkill")}
+                                  </span>
+                                </label>
+                              </div>
+
+                              {(selectionState[selectedPreviewSkill.sourcePath]?.selected ?? true) &&
+                              selectedPreviewSkill.conflict ? (
+                                <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+                                  <div className="text-sm font-medium text-amber-700 dark:text-amber-300">
+                                    {t("marketplace.conflictWithExisting", {
+                                      name: selectedPreviewSkill.conflict.existingName,
+                                    })}
+                                  </div>
+                                  <div className="mt-3 grid gap-2 md:grid-cols-3">
+                                    {(["overwrite", "skip", "rename"] as DuplicateResolution[]).map(
+                                      (option) => (
+                                        <label
+                                          key={option}
+                                          className={cn(
+                                            "flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm",
+                                            (selectionState[selectedPreviewSkill.sourcePath]?.resolution ??
+                                              "skip") === option
+                                              ? "border-primary bg-primary/10"
+                                              : "border-border bg-background"
+                                          )}
+                                        >
+                                          <input
+                                            type="radio"
+                                            name={`resolution-${selectedPreviewSkill.sourcePath}`}
+                                            checked={
+                                              (selectionState[selectedPreviewSkill.sourcePath]
+                                                ?.resolution ?? "skip") === option
+                                            }
+                                            onChange={() =>
+                                              updateSelection(selectedPreviewSkill, {
+                                                resolution: option,
+                                              })
+                                            }
+                                          />
+                                          <span>
+                                            {t(`marketplace.duplicateResolution.${option}`)}
+                                          </span>
+                                        </label>
+                                      )
+                                    )}
+                                  </div>
+                                  {(selectionState[selectedPreviewSkill.sourcePath]?.resolution ??
+                                    "skip") === "rename" ? (
+                                    <div className="mt-3">
+                                      <Input
+                                        value={
+                                          selectionState[selectedPreviewSkill.sourcePath]
+                                            ?.renamedSkillId ?? selectedPreviewSkill.skillId
+                                        }
+                                        onChange={(event) =>
+                                          updateSelection(selectedPreviewSkill, {
+                                            renamedSkillId: event.target.value,
+                                          })
+                                        }
+                                        placeholder={t("marketplace.renameSkillIdPlaceholder")}
+                                      />
+                                    </div>
+                                  ) : null}
                                 </div>
-                              ) : null}
+                              ) : (
+                                <div className="rounded-lg border border-border/70 bg-card/60 p-4 text-sm text-muted-foreground">
+                                  <div className="flex items-center gap-2 font-medium text-foreground">
+                                    <ChevronRight className="size-4 text-primary" />
+                                    <span>{t("marketplace.githubImportNoConflictTitle")}</span>
+                                  </div>
+                                  <p className="mt-2 leading-6">
+                                    {t("marketplace.githubImportNoConflictBody")}
+                                  </p>
+                                </div>
+                              )}
                             </div>
                           ) : null}
                         </div>
