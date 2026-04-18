@@ -1060,10 +1060,14 @@ describe("MarketplaceView", () => {
     fireEvent.click(screen.getByRole("button", { name: /Review import|检查导入内容/i }));
 
     const confirmSummary = await screen.findByTestId("github-import-confirm-summary");
+    const footer = screen.getByTestId("github-import-shell-footer");
     expect(within(confirmSummary).getByText("Ready to import")).toBeInTheDocument();
     expect(within(confirmSummary).getByText("Decision summary")).toBeInTheDocument();
     expect(within(confirmSummary).getByText("first-skill-renamed")).toBeInTheDocument();
-    expect(within(confirmSummary).getByRole("button", { name: "Back to preview" })).toBeInTheDocument();
+    expect(within(confirmSummary).queryByRole("button", { name: "Back to preview" })).not.toBeInTheDocument();
+    expect(footer).toHaveAttribute("data-footer-mode", "confirm");
+    expect(within(footer).getByRole("button", { name: "Back to preview" })).toBeInTheDocument();
+    expect(within(footer).getByRole("button", { name: "Import" })).toBeInTheDocument();
     expect(screen.queryByTestId("github-import-detail-pane")).not.toBeInTheDocument();
   });
 
@@ -1100,6 +1104,7 @@ describe("MarketplaceView", () => {
     fireEvent.click(screen.getByRole("button", { name: /Import GitHub repo|导入 GitHub 仓库/i }));
 
     const resultHub = await screen.findByTestId("github-import-result-hub");
+    const footer = screen.getByTestId("github-import-shell-footer");
     expect(within(resultHub).getByText("Next steps")).toBeInTheDocument();
     expect(
       within(resultHub).getByRole("button", { name: "Install imported skills to platforms" })
@@ -1107,6 +1112,9 @@ describe("MarketplaceView", () => {
     expect(within(resultHub).getByRole("button", { name: "Open Central" })).toBeInTheDocument();
     expect(within(resultHub).getByRole("button", { name: "Start another import" })).toBeInTheDocument();
     expect(within(resultHub).getByText("legacy-skill")).toBeInTheDocument();
+    expect(footer).toHaveAttribute("data-footer-mode", "result");
+    expect(within(footer).getByRole("button", { name: "Start another import" })).toBeInTheDocument();
+    expect(within(footer).getByRole("button", { name: "Close" })).toBeInTheDocument();
   });
 
   it("shows a friendly desktop-only state for the github import wizard in browser mode", async () => {

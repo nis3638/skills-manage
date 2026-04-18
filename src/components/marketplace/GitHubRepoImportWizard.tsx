@@ -179,6 +179,8 @@ export function GitHubRepoImportWizard({
   const canConfirm = selectedSkills.length > 0 && !blockingConflict;
   const isInputStep = step === "input" && !preview && !importResult;
   const showPreviewWorkspace = Boolean(preview) && step === "preview";
+  const showSharedShellBody = Boolean(preview || importResult);
+  const footerMode = step === "result" ? "result" : step === "confirm" ? "confirm" : "preview";
   const dialogContentClassName = cn(
     "flex flex-col overflow-hidden p-0 transition-[width,max-width,height] duration-200 ease-out",
     isInputStep
@@ -455,7 +457,7 @@ export function GitHubRepoImportWizard({
         <div
           className={cn(
             "px-6 py-4",
-            preview || importResult ? "min-h-0 flex-1 overflow-hidden" : "overflow-visible"
+            showSharedShellBody ? "min-h-0 flex-1 overflow-hidden" : "overflow-visible"
           )}
         >
           {preview ? (
@@ -996,8 +998,12 @@ export function GitHubRepoImportWizard({
           ) : null}
         </div>
 
-        {preview || importResult ? (
-          <div className="shrink-0 border-t border-border/70 px-6 py-4">
+        {showSharedShellBody ? (
+          <div
+            className="shrink-0 border-t border-border/70 px-6 py-4"
+            data-testid="github-import-shell-footer"
+            data-footer-mode={footerMode}
+          >
             {step === "result" ? (
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={handleStartAnotherImport}>
@@ -1021,7 +1027,7 @@ export function GitHubRepoImportWizard({
             ) : (
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={() => setStep("preview")}>
-                  <span>{t("common.close")}</span>
+                  <span>{t("marketplace.githubImportBackToPreview")}</span>
                 </Button>
                 <Button onClick={handleImportConfirmClick} disabled={!canConfirm || isImporting}>
                   {isImporting ? (
