@@ -727,6 +727,85 @@ describe("MarketplaceView", () => {
     expect(optionsTab).toHaveAttribute("aria-pressed", "true");
   });
 
+  it("keeps preview shell hooks stable while switching tabs and changing active skills", async () => {
+    mockPreviewGitHubRepoImport.mockImplementation(async () => {
+      storeState.githubImport = {
+        isPreviewLoading: false,
+        isImporting: false,
+        preview: {
+          repo: {
+            owner: "anthropics",
+            repo: "skills",
+            branch: "main",
+            normalizedUrl: "https://github.com/anthropics/skills",
+          },
+          skills: [
+            {
+              sourcePath: "skills/first/SKILL.md",
+              skillId: "first-skill",
+              skillName: "First Skill",
+              description: "First skill full description",
+              rootDirectory: "skills",
+              skillDirectoryName: "first",
+              downloadUrl: "https://example.com/first",
+              conflict: {
+                existingSkillId: "first-skill",
+                existingName: "First Skill",
+                existingCanonicalPath: "/Users/test/.agents/skills/first-skill",
+                proposedSkillId: "first-skill",
+                proposedName: "First Skill",
+              },
+            },
+            {
+              sourcePath: "skills/second/SKILL.md",
+              skillId: "second-skill",
+              skillName: "Second Skill",
+              description: "Second skill full description",
+              rootDirectory: "skills",
+              skillDirectoryName: "second",
+              downloadUrl: "https://example.com/second",
+              conflict: null,
+            },
+          ],
+        },
+        importResult: null,
+        previewedRepoUrl: "https://github.com/anthropics/skills",
+        error: null,
+      };
+    });
+
+    renderView();
+
+    fireEvent.click(screen.getByRole("button", { name: /Import GitHub repo|导入 GitHub 仓库/i }));
+    fireEvent.change(screen.getByLabelText(/GitHub repository URL|GitHub 仓库 URL/i), {
+      target: { value: "https://github.com/anthropics/skills" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Preview import|预览导入/i }));
+
+    await screen.findByTestId("github-import-preview-workspace");
+
+    const workspace = screen.getByTestId("github-import-preview-workspace");
+    const summaryList = screen.getByTestId("github-import-summary-list");
+    const detailPane = screen.getByTestId("github-import-detail-pane");
+    const detailScroll = screen.getByTestId("github-import-detail-scroll");
+    const footer = screen.getByTestId("github-import-shell-footer");
+
+    fireEvent.click(screen.getByTestId("github-import-detail-tab-ai"));
+    fireEvent.click(screen.getByRole("button", { name: /Second Skill/i }));
+
+    expect(workspace).toBeInTheDocument();
+    expect(summaryList).toBeInTheDocument();
+    expect(detailPane).toBeInTheDocument();
+    expect(detailScroll).toBeInTheDocument();
+    expect(footer).toHaveAttribute("data-footer-mode", "preview");
+    expect(screen.getByTestId("github-import-detail-tab-overview")).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    expect(screen.getByText("Second skill full description")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Review import|检查导入内容/i })).toBeInTheDocument();
+  });
+
   it("slims the github preview repo toolbar into a dense two-row summary", async () => {
     mockPreviewGitHubRepoImport.mockImplementation(async () => {
       storeState.githubImport = {
