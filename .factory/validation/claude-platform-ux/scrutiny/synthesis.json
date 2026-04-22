@@ -1,7 +1,7 @@
 {
   "milestone": "claude-platform-ux",
-  "round": 2,
-  "status": "fail",
+  "round": 3,
+  "status": "pass",
   "validatorsRun": {
     "test": {
       "passed": true,
@@ -17,38 +17,31 @@
       "passed": true,
       "command": "pnpm --dir \"/Users/happypeet/Documents/GitHubMe/skills-manage\" lint",
       "exitCode": 0
+    },
+    "clippy": {
+      "passed": true,
+      "command": "cargo clippy --manifest-path \"/Users/happypeet/Documents/GitHubMe/skills-manage/src-tauri/Cargo.toml\" -- -D warnings",
+      "exitCode": 0
     }
   },
   "reviewsSummary": {
-    "total": 2,
+    "total": 1,
     "passed": 1,
-    "failed": 1,
-    "failedFeatures": [
-      "global-rescan-surface-regression-fix"
-    ]
+    "failed": 0,
+    "failedFeatures": []
   },
-  "blockingIssues": [
+  "notes": [
+    "Round 3 re-reviewed `global-rescan-surface-regression-fix` at commit `bb6766206fa6ec792ef6d46da3da2d9502a7d13d` via `.factory/validation/claude-platform-ux/scrutiny/reviews/global-rescan-surface-regression-fix.rerun.json`. The prior blocker is closed: the global `Rescan all skills` action now reruns Discover's real disk scan (`get_scan_roots` -> `start_project_scan`) while preserving Central reloads and live Claude/platform refresh behavior.",
+    "No blocking scrutiny issues remain for the `claude-platform-ux` milestone, so this milestone is cleared for the next validation stage."
+  ],
+  "blockingIssues": [],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [],
+  "rejectedObservations": [
     {
-      "featureId": "global-rescan-surface-regression-fix",
-      "severity": "blocking",
-      "description": "The command-palette action labeled \"Rescan all skills\" still does not run Discover's filesystem scan. `AppShell` now awaits `platformStore.rescan()` and then calls `discoverStore.refreshCounts()`, but `refreshCounts()` only reloads persisted `get_discovered_skills` rows while the real disk scan path remains `startScan()` / `start_project_scan`. Central reloads and the live Claude refresh were preserved, but Discover can still stay stale for new or removed project skills."
+      "observation": "Prior synthesis suggested adding extra command-palette/global-search native validation guidance to shared skill/library docs.",
+      "reason": "already-documented: `.factory/library/user-testing.md` now explicitly documents the command-palette/global-search limitation and recommends targeted state-transition tests first, so no additional shared-state update is needed from this scrutiny round."
     }
   ],
-  "appliedUpdates": [
-    {
-      "target": "library",
-      "description": "Updated `.factory/library/claude-source-aware-detail-api.md` to record that the Claude AI explanation surface is now row-aware, so duplicate `user` and `marketplace` rows keep explanation state separate by selected row identity.",
-      "sourceFeature": "claude-detail-explanation-row-awareness-fix"
-    }
-  ],
-  "suggestedGuidanceUpdates": [
-    {
-      "target": ".factory/skills/claude-scan-frontend-worker/SKILL.md",
-      "suggestion": "Add or point to a reproducible native Tauri automation recipe for command-palette/global-search flows (isolated HOME launch, accessibility steps, and evidence capture) so workers do not keep rediscovering ad hoc macOS automation for this surface.",
-      "evidence": "The `global-rescan-surface-regression-fix` review still found native verification relying on ad hoc accessibility scripting, while the current worker skill says `.factory/library/user-testing.md` is the canonical recipe even though that library entry does not yet cover command-palette/global-search interaction details.",
-      "isSystemic": true
-    }
-  ],
-  "rejectedObservations": [],
-  "previousRound": ".factory/validation/claude-platform-ux/scrutiny/synthesis.round1.json"
+  "previousRound": ".factory/validation/claude-platform-ux/scrutiny/synthesis.round2.json"
 }
