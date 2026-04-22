@@ -1,7 +1,7 @@
 {
   "milestone": "claude-backend-foundation",
-  "round": 2,
-  "status": "fail",
+  "round": 3,
+  "status": "pass",
   "validatorsRun": {
     "test": {
       "passed": true,
@@ -26,45 +26,22 @@
   },
   "reviewsSummary": {
     "total": 1,
-    "passed": 0,
-    "failed": 1,
-    "failedFeatures": [
-      "claude-row-id-detail-compatibility-fix"
-    ]
+    "passed": 1,
+    "failed": 0,
+    "failedFeatures": []
   },
   "notes": [
-    "Round 2 re-reviewed the follow-up fix for the prior `row_id` blocker. The backend compatibility error is resolved, but the detail content pane still loads by plain `skillId`, so duplicate Claude detail is still not fully source-aware.",
-    "The remaining blocker now sits in the fix feature: metadata requests are row-aware, but SKILL.md content is still fetched through `read_skill_content({ skillId })` instead of the selected row path."
+    "Round 3 re-reviewed `claude-row-id-detail-compatibility-fix` at commit `b27b35211c1167714ceb3b702c83836f165131d3`. The remaining source-aware detail blocker is closed: SKILL.md content now loads from the resolved row path, and the resolved Claude `row_id` is preserved for later refresh/install reloads.",
+    "No blocking scrutiny issues remain for the `claude-backend-foundation` milestone, so this milestone is cleared for the next validation stage."
   ],
-  "blockingIssues": [
-    {
-      "featureId": "claude-row-id-detail-compatibility-fix",
-      "severity": "blocking",
-      "description": "`src/stores/skillDetailStore.ts:187` still loads content with `read_skill_content({ skillId })` after fetching row-aware detail. Because `src-tauri/src/commands/skills.rs:357-366` resolves content through `db::get_skill_by_id`, duplicate Claude rows still collapse onto the manageable/canonical file, and marketplace-only survivors can still fail content loading. The selected detail row must instead load content from its resolved path (for example via `read_file_by_path(detail.file_path)`) to preserve source-aware detail behavior."
-    }
-  ],
+  "blockingIssues": [],
   "appliedUpdates": [],
-  "suggestedGuidanceUpdates": [
-    {
-      "target": ".factory/skills/claude-scan-frontend-worker/SKILL.md",
-      "suggestion": "For fix follow-ups and reruns, require the worker to reread any mission library notes added after the original failure when those notes document the exact API or contract they are repairing.",
-      "evidence": "The review for `claude-row-id-detail-compatibility-fix` found that `.factory/library/claude-source-aware-detail-api.md` already documented the required `read_file_by_path(detail.file_path)` follow-up, but the frontend worker skill only mandated a fixed startup reading list and the fix still used `read_skill_content({ skillId })`.",
-      "isSystemic": false
-    }
-  ],
+  "suggestedGuidanceUpdates": [],
   "rejectedObservations": [
     {
-      "observation": "The backend worker skill/procedure lacks frontend-targeted validation guidance for IPC payload changes.",
-      "reason": "already-addressed: `.factory/skills/claude-scan-backend-worker/SKILL.md` now explicitly requires `test-frontend-targeted`, `typecheck`, and `lint` when frontend-consumed payloads change."
-    },
-    {
-      "observation": "The backend worker skill/procedure lacks guidance for producing a scoped feature commit when the shared mission workspace is already dirty from unrelated work.",
-      "reason": "already-documented in mission AGENTS.md, which already tells workers not to clean/stash unrelated dirty files and to commit only feature-owned files."
-    },
-    {
-      "observation": "The worker marked `followedProcedure` true even though the reviewed feature stored `row_id` internally without exposing it on the reviewed API surface.",
-      "reason": "feature-specific reviewer feedback rather than a durable shared-state rule or repository knowledge update."
+      "observation": "The mission lacks a scriptable native Tauri validation path for duplicate Claude row switching.",
+      "reason": "ambiguous/infrastructure-level: `.factory/services.yaml` already documents isolated Tauri startup, but adding a deep-link or automation hook would require new app/test infrastructure rather than a low-risk validator-side services or library update."
     }
   ],
-  "previousRound": ".factory/validation/claude-backend-foundation/scrutiny/synthesis.round1.json"
+  "previousRound": ".factory/validation/claude-backend-foundation/scrutiny/synthesis.round2.json"
 }
