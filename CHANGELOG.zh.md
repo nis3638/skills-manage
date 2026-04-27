@@ -2,6 +2,26 @@
 
 本文件记录该项目的重要变更。
 
+## 0.9.3 - 2026-04-28
+
+新功能版本：中央技能目录可以在 UI 里直接配置，相关命令都会读取该配置。
+
+### 新功能
+
+- 设置页新增 **中央技能目录** 卡片：输入框 + 保存按钮 + 保存后自动重新扫描。
+- 新增 `set_central_skills_dir` 后端命令 + DB 辅助函数 `update_central_skills_dir`。
+- 新增 `write_skill_to_central` 命令，用于技能市场预览安装（替换原来的 `BaseDirectory.Home` 写死路径）。
+
+### 改进
+
+- `install_marketplace_skill`、`write_skill_to_central`（技能市场）以及 `start_project_scan`（项目发现）改为从数据库读取配置的中央路径，而不是默认常量。
+- 中央库空状态提示与技能市场预览安装路径都会反映当前配置。
+- `seed_builtin_agents` 在每次启动时不再覆盖用户自定义的 `central` 路径。
+
+### 测试
+
+- `SettingsView.test.tsx` "saves the github pat from settings" 用例改为先按输入框定位到 GitHub PAT 卡片再在卡片内查找 `保存` 按钮，避免与新的中央目录保存按钮冲突。
+
 ## 0.9.2 - 2026-04-27
 
 这是一次维护版本，把中央技能库扫描改为递归扫描。

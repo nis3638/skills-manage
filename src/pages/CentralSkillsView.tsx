@@ -110,6 +110,9 @@ function EmptyState({ message }: { message: string }) {
 function FirstVisitEmptyState() {
   const navigate = useNavigate();
   const { t } = useTranslation();
+  const agents = useCentralSkillsStore((state) => state.agents);
+  const centralAgent = agents?.find((a) => a.id === "central");
+  const centralPath = centralAgent?.global_skills_dir ? formatPathForDisplay(centralAgent.global_skills_dir) : "~/.agents/skills";
   return (
     <div className="flex flex-col items-center justify-center h-full gap-6 py-16 text-center px-8">
       <div className="p-5 rounded-full bg-primary/10 ring-1 ring-primary/20">
@@ -125,7 +128,7 @@ function FirstVisitEmptyState() {
         <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/50 rounded-xl px-4 py-3 max-w-xs text-left border border-border">
           <FolderOpen className="size-4 shrink-0 text-primary/60" />
           <span>
-            {t("empty.createHint")} <code className="font-mono">~/.agents/skills/my-skill/SKILL.md</code>
+            {t("empty.createHint")} <code className="font-mono">{centralPath}/my-skill/SKILL.md</code>
           </span>
         </div>
         <Button

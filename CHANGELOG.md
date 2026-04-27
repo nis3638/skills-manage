@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.9.3 - 2026-04-28
+
+Feature release: the central skills directory is configurable from the UI, and downstream commands honour the configured path.
+
+### Features
+
+- New **Central Skills Directory** card in Settings with input + Save + post-save rescan.
+- `set_central_skills_dir` Tauri command + DB helper `update_central_skills_dir`.
+- New `write_skill_to_central` command for Marketplace preview installs (replaces the previous `BaseDirectory.Home` hardcoded path).
+
+### Improvements
+
+- Marketplace install (`install_marketplace_skill`, `write_skill_to_central`) and project discovery (`start_project_scan`) now read the configured central directory from the DB instead of the default constant.
+- Central library empty-state hint and Marketplace preview install reflect the configured directory.
+- `seed_builtin_agents` no longer overwrites the user-customised `central` agent path on every startup.
+
+### Tests
+
+- `SettingsView.test.tsx` "saves the github pat from settings" now scopes its `保存` lookup to the GitHub PAT card so it does not collide with the new central-directory Save button.
+
 ## 0.9.2 - 2026-04-27
 
 Maintenance release that makes the central skills library scanner recursive.

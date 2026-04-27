@@ -351,7 +351,10 @@ async fn sync_registry_impl(
     };
 
     // Check which skills are already installed locally
-    let central_dir = central_skills_dir();
+    let central_dir = match crate::db::get_agent_by_id(pool, "central").await {
+        Ok(Some(agent)) => std::path::PathBuf::from(agent.global_skills_dir),
+        _ => central_skills_dir(),
+    };
 
     // Upsert skills into marketplace_skills
     for skill in &skills {
@@ -519,7 +522,11 @@ pub async fn install_marketplace_skill(
         .map_err(|e| format!("Failed to read response: {}", e))?;
 
     // Create directory and write SKILL.md
-    let skill_dir = central_skills_dir().join(&skill.name);
+    let skill_dir = match crate::db::get_agent_by_id(&state.db, "central").await {
+        Ok(Some(agent)) => std::path::PathBuf::from(agent.global_skills_dir),
+        _ => central_skills_dir(),
+    }
+    .join(&skill.name);
     std::fs::create_dir_all(&skill_dir)
         .map_err(|e| format!("Failed to create directory: {}", e))?;
 
@@ -534,6 +541,26 @@ pub async fn install_marketplace_skill(
         .await
         .map_err(|e| e.to_string())?;
 
+    Ok(())
+}
+
+/// Write a SKILL.md file into the central skills directory for a preview skill.
+/// Used by the frontend preview-install flow to avoid hardcoding the central path.
+#[tauri::command]
+pub async fn write_skill_to_central(
+    state: State<'_, AppState>,
+    name: String,
+    content: String,
+) -> Result<(), String> {
+    let central_dir = match crate::db::get_agent_by_id(&state.db, "central").await {
+        Ok(Some(agent)) => std::path::PathBuf::from(agent.global_skills_dir),
+        _ => central_skills_dir(),
+    };
+    let skill_dir = central_dir.join(&name);
+    std::fs::create_dir_all(&skill_dir)
+        .map_err(|e| format!("Failed to create directory: {}", e))?;
+    std::fs::write(skill_dir.join("SKILL.md"), &content)
+        .map_err(|e| format!("Failed to write SKILL.md: {}", e))?;
     Ok(())
 }
 

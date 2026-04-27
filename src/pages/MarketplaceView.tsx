@@ -254,16 +254,12 @@ export function MarketplaceView() {
   async function handleInstallPreviewSkill(skill: PreviewSkill) {
     setPreviewInstallingIds((prev) => new Set(prev).add(skill.name));
     try {
-      // Download SKILL.md and write to central dir via Tauri FS plugin
+      // Download SKILL.md and write to central dir via backend command
       const resp = await fetch(skill.downloadUrl);
       if (!resp.ok) throw new Error(`Download failed: ${resp.status}`);
       const content = await resp.text();
 
-      // Write via the Tauri FS plugin
-      const { writeTextFile, mkdir, BaseDirectory } = await import("@tauri-apps/plugin-fs");
-      const skillDir = `.agents/skills/${skill.name}`;
-      await mkdir(skillDir, { baseDir: BaseDirectory.Home, recursive: true });
-      await writeTextFile(`${skillDir}/SKILL.md`, content, { baseDir: BaseDirectory.Home });
+      await invoke("write_skill_to_central", { name: skill.name, content });
 
       await rescan();
       toast.success(t("marketplace.installSuccess"));

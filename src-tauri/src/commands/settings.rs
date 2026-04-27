@@ -54,6 +54,18 @@ pub async fn set_setting_impl(pool: &DbPool, key: &str, value: &str) -> Result<(
     db::set_setting(pool, key, value).await
 }
 
+/// Update the central agent's skills directory path.
+/// Expands tilde paths and validates non-empty.
+pub async fn set_central_skills_dir_impl(pool: &DbPool, path: &str) -> Result<String, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Central skills directory path cannot be empty".to_string());
+    }
+    let expanded = path_to_string(&expand_home_path(trimmed));
+    db::update_central_skills_dir(pool, &expanded).await?;
+    Ok(expanded)
+}
+
 // ─── Tauri Commands ───────────────────────────────────────────────────────────
 
 /// Tauri command: return all scan directories.
@@ -107,6 +119,15 @@ pub async fn set_setting(
     value: String,
 ) -> Result<(), String> {
     set_setting_impl(&state.db, &key, &value).await
+}
+
+/// Tauri command: update the central skills directory path.
+#[tauri::command]
+pub async fn set_central_skills_dir(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<String, String> {
+    set_central_skills_dir_impl(&state.db, &path).await
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

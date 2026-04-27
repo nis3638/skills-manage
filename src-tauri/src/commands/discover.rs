@@ -479,7 +479,10 @@ pub async fn start_project_scan(
     let patterns = platform_skill_patterns(pool);
 
     // Determine central skills dir.
-    let central_dir = central_skills_dir();
+    let central_dir = match db::get_agent_by_id(pool, "central").await {
+        Ok(Some(agent)) => PathBuf::from(agent.global_skills_dir),
+        _ => central_skills_dir(),
+    };
 
     // Filter to enabled roots that exist.
     let enabled_roots: Vec<&ScanRoot> = roots.iter().filter(|r| r.enabled && r.exists).collect();

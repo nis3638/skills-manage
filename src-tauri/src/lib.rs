@@ -76,6 +76,7 @@ pub fn run() {
             commands::settings::set_scan_directory_active,
             commands::settings::get_setting,
             commands::settings::set_setting,
+            commands::settings::set_central_skills_dir,
             // Discover
             commands::discover::discover_scan_roots,
             commands::discover::get_scan_roots,
@@ -101,6 +102,7 @@ pub fn run() {
             commands::marketplace::get_skill_explanation,
             commands::marketplace::explain_skill_stream,
             commands::marketplace::refresh_skill_explanation,
+            commands::marketplace::write_skill_to_central,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

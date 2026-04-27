@@ -434,7 +434,10 @@ async fn seed_builtin_agents(pool: &DbPool) -> Result<(), String> {
              ON CONFLICT(id) DO UPDATE SET
               display_name = excluded.display_name,
               category = excluded.category,
-              global_skills_dir = excluded.global_skills_dir,
+              global_skills_dir = CASE
+                WHEN agents.id = 'central' THEN agents.global_skills_dir
+                ELSE excluded.global_skills_dir
+              END,
               project_skills_dir = excluded.project_skills_dir,
               icon_name = excluded.icon_name",
         )
@@ -886,6 +889,22 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_enabled: true,
         },
     ]
+}
+
+/// Update the central agent's `global_skills_dir`.
+pub async fn update_central_skills_dir(pool: &DbPool, new_dir: &str) -> Result<(), String> {
+    let result = sqlx::query(
+        "UPDATE agents SET global_skills_dir = ? WHERE id = 'central' AND is_builtin = 1",
+    )
+    .bind(new_dir)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if result.rows_affected() == 0 {
+        return Err("Central agent not found".to_string());
+    }
+    Ok(())
 }
 
 // ─── Skills ───────────────────────────────────────────────────────────────────

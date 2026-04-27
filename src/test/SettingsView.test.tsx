@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { SettingsView } from "../pages/SettingsView";
 import { ScanDirectory, AgentWithStatus } from "../types";
@@ -211,10 +211,14 @@ describe("SettingsView", () => {
     setupMocks({ githubPat: "", saveGitHubPat });
     renderSettingsView();
 
-    fireEvent.change(screen.getByLabelText("GitHub Personal Access Token"), {
+    const patInput = screen.getByLabelText("GitHub Personal Access Token");
+    fireEvent.change(patInput, {
       target: { value: "  github_pat_new  " },
     });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    // Scope the "保存" lookup to the GitHub PAT card so it doesn't collide
+    // with the central-skills-directory card's save button.
+    const patCard = patInput.closest('[data-slot="card"]') as HTMLElement;
+    fireEvent.click(within(patCard).getByRole("button", { name: "保存" }));
 
     await waitFor(() => {
       expect(saveGitHubPat).toHaveBeenCalledWith("  github_pat_new  ");

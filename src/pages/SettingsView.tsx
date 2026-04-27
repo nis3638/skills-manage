@@ -288,6 +288,9 @@ export function SettingsView() {
   const [platformError, setPlatformError] = useState<string | null>(null);
   const [githubPatInput, setGitHubPatInput] = useState("");
   const [githubPatMessage, setGitHubPatMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [centralDirInput, setCentralDirInput] = useState("");
+  const [centralDirLoaded, setCentralDirLoaded] = useState(false);
+  const [isSavingCentralDir, setIsSavingCentralDir] = useState(false);
 
   // ── Load on mount ──────────────────────────────────────────────────────────
 
@@ -296,11 +299,26 @@ export function SettingsView() {
     loadGitHubPat();
   }, [loadScanDirectories, loadGitHubPat]);
 
+  // Load central dir from agents
+  useEffect(() => {
+    const centralAgent = agents.find((a) => a.id === "central");
+    if (centralAgent && !centralDirLoaded) {
+      setCentralDirInput(formatPathForDisplay(centralAgent.global_skills_dir));
+      setCentralDirLoaded(true);
+    }
+  }, [agents, centralDirLoaded]);
+
   useEffect(() => {
     setGitHubPatInput(githubPat);
   }, [githubPat]);
 
   const isGitHubPatDirty = useMemo(() => githubPatInput.trim() !== githubPat, [githubPatInput, githubPat]);
+
+  const centralAgent = agents.find((a) => a.id === "central");
+  const isCentralDirDirty = useMemo(
+    () => centralDirInput.trim() !== (centralAgent ? formatPathForDisplay(centralAgent.global_skills_dir) : ""),
+    [centralDirInput, centralAgent]
+  );
 
   // ── Scan Directories Handlers ──────────────────────────────────────────────
 
@@ -448,6 +466,20 @@ export function SettingsView() {
     }
   }
 
+  async function handleSaveCentralDir() {
+    setIsSavingCentralDir(true);
+    try {
+      await invoke("set_central_skills_dir", { path: centralDirInput });
+      await rescan();
+      setCentralDirLoaded(false); // trigger reload from updated agents
+      toast.success(t("settings.centralDirSaved"));
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setIsSavingCentralDir(false);
+    }
+  }
+
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
@@ -459,6 +491,45 @@ export function SettingsView() {
 
       {/* Content */}
       <div className="flex-1 overflow-auto p-6 space-y-6">
+
+        {/* ── Section 0: Central Skills Directory ─────────────────────── */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <FolderOpen className="size-5 text-muted-foreground" />
+              <div>
+                <CardTitle>{t("settings.centralDirTitle")}</CardTitle>
+                <CardDescription className="mt-1">
+                  {t("settings.centralDirDesc")}
+                </CardDescription>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3">
+              <div>
+                <label htmlFor="central-dir" className="mb-1 block text-xs text-muted-foreground">
+                  {t("settings.centralDirLabel")}
+                </label>
+                <Input
+                  id="central-dir"
+                  placeholder={t("settings.centralDirPlaceholder")}
+                  value={centralDirInput}
+                  onChange={(e) => setCentralDirInput(e.target.value)}
+                  disabled={isSavingCentralDir}
+                />
+              </div>
+              <Button
+                onClick={handleSaveCentralDir}
+                disabled={isSavingCentralDir || !isCentralDirDirty || !centralDirInput.trim()}
+                size="sm"
+              >
+                {isSavingCentralDir ? <Loader2 className="size-4 animate-spin" /> : null}
+                <span>{t("common.save")}</span>
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
 
         {/* ── Section 1: Custom Platforms ───────────────────────────────────── */}
         <Card>
