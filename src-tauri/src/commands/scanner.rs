@@ -150,17 +150,74 @@ pub fn detect_link_type(path: &Path, is_central_dir: bool) -> (String, Option<St
     }
 }
 
-/// Walk `dir` one level deep, looking for immediate subdirectories that contain
-/// a `SKILL.md` file. For each such subdirectory, `parse_skill_md` and
+/// Maximum recursion depth used by [`scan_directory`] when walking nested
+/// directories. A defensive cap so a misconfigured root (huge tree, weird
+/// symlink farm) cannot stall the scan indefinitely.
+const MAX_SCAN_DEPTH: usize = 16;
+
+/// Directory basenames that are never plausible skill containers and would
+/// otherwise inflate the recursive scan dramatically. Hidden dirs (`.git`,
+/// `.venv`, …) are skipped separately by the leading-dot check.
+const SKIP_DIR_NAMES: &[&str] = &[
+    "node_modules",
+    "dist",
+    "build",
+    "target",
+    "__pycache__",
+    ".git",
+];
+
+/// Recursively walk `dir`, looking for any subdirectory that contains a
+/// `SKILL.md` file. For each such directory, `parse_skill_md` and
 /// `detect_link_type` are called to build a `ScannedSkill`.
 ///
-/// Entries that cannot be read or lack valid frontmatter are silently skipped.
+/// Behaviour:
+/// * Once a directory is identified as a skill (has `SKILL.md`), recursion
+///   stops there — nested directories inside a skill are *not* re-scanned.
+/// * Hidden directories (basename starting with `.`) and well-known heavy
+///   dirs (`node_modules`, `dist`, `build`, `target`, `__pycache__`) are
+///   skipped to keep scans fast.
+/// * Symlink cycles are avoided via a canonicalised-path visited set, and
+///   recursion is bounded by [`MAX_SCAN_DEPTH`].
+/// * Entries that cannot be read or lack valid frontmatter are silently
+///   skipped.
+///
+/// Note on IDs: a skill's `id` is derived from its directory basename
+/// (lowercased, spaces → `-`). If two skill directories with the same
+/// basename appear under different paths (e.g. `src/shared/doc` and
+/// `src/personal/doc`), they will share an ID and the later one wins on
+/// upsert. This matches the previous one-level behaviour.
 pub fn scan_directory(dir: &Path, is_central: bool) -> Vec<ScannedSkill> {
     let mut skills = Vec::new();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    scan_directory_recursive(dir, is_central, &mut skills, &mut visited, 0);
+    skills
+}
+
+fn scan_directory_recursive(
+    dir: &Path,
+    is_central: bool,
+    skills: &mut Vec<ScannedSkill>,
+    visited: &mut HashSet<PathBuf>,
+    depth: usize,
+) {
+    if depth > MAX_SCAN_DEPTH {
+        return;
+    }
+
+    // Cycle/loop protection across symlinks: dedupe via canonicalised paths.
+    // If canonicalisation fails (e.g. dangling symlink), bail on this branch.
+    let canonical = match std::fs::canonicalize(dir) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if !visited.insert(canonical) {
+        return;
+    }
 
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
-        Err(_) => return skills,
+        Err(_) => return,
     };
 
     for entry in entries.flatten() {
@@ -175,41 +232,46 @@ pub fn scan_directory(dir: &Path, is_central: bool) -> Vec<ScannedSkill> {
             continue;
         }
 
-        // Only include entries that contain a SKILL.md file.
-        let skill_md_path = entry_path.join("SKILL.md");
-        if !skill_md_path.exists() {
+        // Skip hidden directories and well-known non-skill dirs.
+        let basename = entry_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        if basename.is_empty() || basename.starts_with('.') {
+            continue;
+        }
+        if SKIP_DIR_NAMES.iter().any(|s| *s == basename) {
             continue;
         }
 
-        // Parse frontmatter; skip entries with invalid/missing frontmatter.
-        let info = match parse_skill_md(&skill_md_path) {
-            Some(i) => i,
-            None => continue,
-        };
+        // If this directory itself is a skill, record it and stop descending.
+        let skill_md_path = entry_path.join("SKILL.md");
+        if skill_md_path.is_file() {
+            let info = match parse_skill_md(&skill_md_path) {
+                Some(i) => i,
+                None => continue,
+            };
 
-        // Detect link type using lstat on the skill directory itself.
-        let (link_type, symlink_target) = detect_link_type(&entry_path, is_central);
+            let (link_type, symlink_target) = detect_link_type(&entry_path, is_central);
 
-        // Derive a stable ID from the directory name.
-        let id = entry_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_lowercase().replace(' ', "-"))
-            .unwrap_or_else(|| "unknown".to_string());
+            let id = basename.to_lowercase().replace(' ', "-");
 
-        skills.push(ScannedSkill {
-            id,
-            name: info.name,
-            description: info.description,
-            file_path: skill_md_path.to_string_lossy().into_owned(),
-            dir_path: entry_path.to_string_lossy().into_owned(),
-            link_type,
-            symlink_target,
-            is_central,
-        });
+            skills.push(ScannedSkill {
+                id,
+                name: info.name,
+                description: info.description,
+                file_path: skill_md_path.to_string_lossy().into_owned(),
+                dir_path: entry_path.to_string_lossy().into_owned(),
+                link_type,
+                symlink_target,
+                is_central,
+            });
+            continue;
+        }
+
+        // Otherwise, descend looking for skills deeper in the tree.
+        scan_directory_recursive(&entry_path, is_central, skills, visited, depth + 1);
     }
-
-    skills
 }
 
 fn read_json_file<T: DeserializeOwned>(path: &Path) -> Option<T> {
@@ -809,22 +871,55 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_directory_is_not_recursive() {
+    fn test_scan_directory_is_recursive() {
         let tmp = TempDir::new().unwrap();
-        // Create a nested structure (depth 2); only top-level subdirs should be found
-        let deep_dir = tmp.path().join("outer").join("inner");
-        fs::create_dir_all(&deep_dir).unwrap();
-        fs::write(
-            deep_dir.join("SKILL.md"),
-            &valid_skill_md("Deep Skill", "too deep"),
-        )
-        .unwrap();
+        // Top-level skill
+        create_skill_dir(tmp.path(), "top-skill", &valid_skill_md("Top", "t"));
+        // Nested skill at depth 3 (e.g., src/shared/<skill>/SKILL.md)
+        let nested_parent = tmp.path().join("src").join("shared");
+        fs::create_dir_all(&nested_parent).unwrap();
+        create_skill_dir(&nested_parent, "nested-skill", &valid_skill_md("Nested", "n"));
+
+        let mut skills = scan_directory(tmp.path(), false);
+        skills.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(skills.len(), 2);
+        assert_eq!(skills[0].id, "nested-skill");
+        assert_eq!(skills[1].id, "top-skill");
+    }
+
+    #[test]
+    fn test_scan_directory_does_not_descend_into_a_skill() {
+        let tmp = TempDir::new().unwrap();
+        // Outer skill
+        let outer = create_skill_dir(tmp.path(), "outer", &valid_skill_md("Outer", "o"));
+        // Inner directory inside the outer skill that *also* has a SKILL.md
+        // (e.g., a bundled sub-skill or example). Recursion must stop at outer.
+        let inner = outer.join("examples").join("inner");
+        fs::create_dir_all(&inner).unwrap();
+        fs::write(inner.join("SKILL.md"), &valid_skill_md("Inner", "i")).unwrap();
 
         let skills = scan_directory(tmp.path(), false);
-        assert!(
-            skills.is_empty(),
-            "scan_directory should not descend more than one level"
-        );
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].id, "outer");
+    }
+
+    #[test]
+    fn test_scan_directory_skips_hidden_and_heavy_dirs() {
+        let tmp = TempDir::new().unwrap();
+        // Hidden dir — should be skipped.
+        let hidden_skill_parent = tmp.path().join(".cache");
+        fs::create_dir_all(&hidden_skill_parent).unwrap();
+        create_skill_dir(&hidden_skill_parent, "hidden", &valid_skill_md("H", "h"));
+        // node_modules — should be skipped.
+        let node_modules = tmp.path().join("node_modules");
+        fs::create_dir_all(&node_modules).unwrap();
+        create_skill_dir(&node_modules, "vendor", &valid_skill_md("V", "v"));
+        // Real visible skill — should be picked up.
+        create_skill_dir(tmp.path(), "real", &valid_skill_md("R", "r"));
+
+        let skills = scan_directory(tmp.path(), false);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].id, "real");
     }
 
     #[test]

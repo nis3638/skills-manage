@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.9.2 - 2026-04-27
+
+Maintenance release that makes the central skills library scanner recursive.
+
+### Improvements
+
+- `scan_directory` now walks the central directory recursively, so skills nested at any depth (for example `~/skills/src/shared/<skill>/SKILL.md`) are picked up automatically.
+- Recursion stops at any directory that already contains `SKILL.md`, so a skill's own subfolders are not re-scanned as separate skills.
+- Added skip rules for hidden directories (`.git`, `.cache`, ...) and well-known heavy directories (`node_modules`, `dist`, `build`, `target`, `__pycache__`).
+- Added cycle protection via a canonicalised visited-path set plus a hard depth cap of 16.
+
+### Tests
+
+- Replaced the legacy `test_scan_directory_is_not_recursive` assertion with three new tests covering recursive discovery, no-descend-into-a-skill, and the new skip rules.
+
 ## 0.9.1 - 2026-04-23
 
 Maintenance release focused on full-path display consistency and small README polish.
