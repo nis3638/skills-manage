@@ -130,8 +130,8 @@ describe("DiscoverConfigDialog", () => {
 
   it("renders each scan root path", () => {
     renderDialog();
-    expect(screen.getByText("/home/user/Documents")).toBeInTheDocument();
-    expect(screen.getByText("/home/user/projects")).toBeInTheDocument();
+    expect(screen.getByTitle("/home/user/Documents")).toBeInTheDocument();
+    expect(screen.getByTitle("/home/user/projects")).toBeInTheDocument();
   });
 
   it("renders 'Looking for' section with platform patterns", () => {
