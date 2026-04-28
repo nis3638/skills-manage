@@ -157,6 +157,8 @@ export interface ScanRoot {
   label: string;
   exists: boolean;
   enabled: boolean;
+  /** True if this root was added by the user (vs a built-in default). */
+  is_custom?: boolean;
 }
 
 export interface DiscoveredSkill {

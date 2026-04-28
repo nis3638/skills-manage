@@ -2,6 +2,34 @@
 
 本文件记录该项目的重要变更。
 
+## 0.9.4 - 2026-04-28
+
+新功能版本：项目技能库「重新扫描」对话框支持自定义扫描路径、复制完整路径，长路径以中间省略号显示而不再撑破对话框。
+
+### 新功能
+
+- **自定义扫描根目录**：「重新扫描」对话框新增 「+ 添加路径」 按钮，点击后弹出系统目录选择器；自定义路径持久化到 SQLite（`discover_scan_roots_config`），与内置默认目录合并展示。
+- **移除自定义根目录**：用户添加的目录行右侧有 ✕ 按钮可一键删除；内置默认目录依然只能启用/禁用。
+- **复制路径**：每个扫描根目录行新增复制图标按钮,点击即把完整路径写入剪贴板并 toast 提示；鼠标悬停时还会通过原生 `title` 显示完整路径。
+
+### 改进
+
+- 扫描根目录的持久化格式从 `HashMap<path, enabled>` 升级为 `{ overrides, custom }`,旧版本配置在读取时自动透明迁移。
+- 长路径在对话框中以**中间省略号**展示（开头部分 RTL 截断 + 末级 basename 始终可见），对话框最大宽度从 `lg` 扩到 `2xl`，更宽松。
+- 在对话框 grid/flex 链路上补齐 `min-w-0` 约束，路径过长时不再把对话框撑出 `max-w` 范围。
+
+### 后端
+
+- 新增 IPC 命令 `add_scan_root` 与 `remove_scan_root`（`src-tauri/src/commands/discover.rs`），包含绝对路径/存在性/目录校验，并与内置默认根去重。
+- `ScanRoot` 类型新增 `is_custom: bool` 字段，让 UI 区分自定义路径与默认路径。
+- 新增 `ScanRootsConfig` 结构 + `load_scan_roots_config` / `save_scan_roots_config` 辅助函数；`get_scan_roots` 与 `set_scan_root_enabled` 基于此重写。
+
+### 测试
+
+- 新增 3 个 Rust 测试：`test_add_and_remove_custom_scan_root`、`test_add_scan_root_rejects_invalid_paths`、`test_legacy_config_format_is_parsed`。
+- `discover.rs` 中已有的 `ScanRoot` 字面量测试同步增加新字段。
+- `src/test/DiscoverView.test.tsx` 的 mock 状态补充 `addScanRoot` / `removeScanRoot`。
+
 ## 0.9.3 - 2026-04-28
 
 新功能版本：中央技能目录可以在 UI 里直接配置，相关命令都会读取该配置。

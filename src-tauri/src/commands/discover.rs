@@ -20,6 +20,75 @@ pub struct ScanRoot {
     pub label: String,
     pub exists: bool,
     pub enabled: bool,
+    /// Whether this root was added by the user (vs a built-in default).
+    /// Custom roots can be removed; defaults can only be enabled/disabled.
+    #[serde(default)]
+    pub is_custom: bool,
+}
+
+/// Persisted config for scan roots.
+///
+/// Stored as a single JSON blob under settings key
+/// `discover_scan_roots_config`. Backward compatible with the legacy
+/// format (a bare `HashMap<String, bool>` of path -> enabled).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ScanRootsConfig {
+    /// Per-path enabled-state overrides (applies to both defaults and customs).
+    #[serde(default)]
+    overrides: HashMap<String, bool>,
+    /// User-added custom paths.
+    #[serde(default)]
+    custom: Vec<String>,
+}
+
+impl ScanRootsConfig {
+    /// Parse JSON, falling back to the legacy `HashMap<String, bool>` format.
+    fn from_json(json: &str) -> Result<Self, String> {
+        // Try the new struct format first.
+        if let Ok(cfg) = serde_json::from_str::<ScanRootsConfig>(json) {
+            // Heuristic: serde_json will happily deserialize a legacy
+            // HashMap into the new struct with all default fields, leaving
+            // overrides empty. Detect that case by re-parsing as a map and
+            // preferring it when the struct came back fully empty.
+            if !cfg.overrides.is_empty() || !cfg.custom.is_empty() {
+                return Ok(cfg);
+            }
+        }
+        // Legacy fallback: bare HashMap<String, bool>.
+        match serde_json::from_str::<HashMap<String, bool>>(json) {
+            Ok(map) => Ok(ScanRootsConfig {
+                overrides: map,
+                custom: Vec::new(),
+            }),
+            Err(_) => Ok(ScanRootsConfig::default()),
+        }
+    }
+
+    fn to_json(&self) -> Result<String, String> {
+        serde_json::to_string(self)
+            .map_err(|e| format!("Failed to serialize scan roots config: {}", e))
+    }
+}
+
+async fn load_scan_roots_config(pool: &DbPool) -> Result<ScanRootsConfig, String> {
+    match db::get_setting(pool, "discover_scan_roots_config").await? {
+        Some(json) => ScanRootsConfig::from_json(&json),
+        None => Ok(ScanRootsConfig::default()),
+    }
+}
+
+async fn save_scan_roots_config(pool: &DbPool, cfg: &ScanRootsConfig) -> Result<(), String> {
+    let json = cfg.to_json()?;
+    db::set_setting(pool, "discover_scan_roots_config", &json).await
+}
+
+/// Build a human-friendly label from an absolute path (its basename).
+fn label_from_path(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| path.to_string())
 }
 
 /// A project-level skill discovered during a full-disk scan.
@@ -121,6 +190,7 @@ fn default_scan_roots() -> Vec<ScanRoot> {
                 label: label.to_string(),
                 exists,
                 enabled: exists, // auto-enable roots that exist
+                is_custom: false,
             }
         })
         .collect()
@@ -412,23 +482,36 @@ pub async fn discover_scan_roots() -> Result<Vec<ScanRoot>, String> {
 
 /// Get scan roots with persisted enabled state from DB.
 ///
-/// Returns auto-detected default roots, then overlays any previously
-/// persisted enabled/disabled states from the settings table.
+/// Returns auto-detected default roots, plus any user-added custom roots,
+/// with per-path enabled overrides from the settings table applied on top.
 #[tauri::command]
 pub async fn get_scan_roots(state: State<'_, AppState>) -> Result<Vec<ScanRoot>, String> {
     let pool = &state.db;
+    let cfg = load_scan_roots_config(pool).await?;
+
     let mut roots = default_scan_roots();
 
-    // Load persisted enabled states from settings.
-    // We store a single JSON blob under the key "discover_scan_roots_config"
-    // mapping path -> enabled (bool).
-    if let Some(json) = db::get_setting(pool, "discover_scan_roots_config").await? {
-        let config: HashMap<String, bool> =
-            serde_json::from_str(&json).map_err(|e| format!("Invalid scan roots config: {}", e))?;
-        for root in &mut roots {
-            if let Some(&enabled) = config.get(&root.path) {
-                root.enabled = enabled;
-            }
+    // Append user-added custom roots (skip duplicates of defaults).
+    let default_paths: std::collections::HashSet<String> =
+        roots.iter().map(|r| r.path.clone()).collect();
+    for custom_path in &cfg.custom {
+        if default_paths.contains(custom_path) {
+            continue;
+        }
+        let exists = Path::new(custom_path).exists();
+        roots.push(ScanRoot {
+            path: custom_path.clone(),
+            label: label_from_path(custom_path),
+            exists,
+            enabled: exists,
+            is_custom: true,
+        });
+    }
+
+    // Apply enabled overrides.
+    for root in &mut roots {
+        if let Some(&enabled) = cfg.overrides.get(&root.path) {
+            root.enabled = enabled;
         }
     }
 
@@ -437,8 +520,7 @@ pub async fn get_scan_roots(state: State<'_, AppState>) -> Result<Vec<ScanRoot>,
 
 /// Persist the enabled/disabled state of a scan root.
 ///
-/// Updates the "discover_scan_roots_config" setting in the DB, which
-/// stores a JSON object mapping root paths to their enabled state.
+/// Updates the per-path `overrides` map in the persisted config.
 #[tauri::command]
 pub async fn set_scan_root_enabled(
     state: State<'_, AppState>,
@@ -446,20 +528,71 @@ pub async fn set_scan_root_enabled(
     enabled: bool,
 ) -> Result<(), String> {
     let pool = &state.db;
+    let mut cfg = load_scan_roots_config(pool).await?;
+    cfg.overrides.insert(path, enabled);
+    save_scan_roots_config(pool, &cfg).await
+}
 
-    // Load existing config or start fresh.
-    let mut config: HashMap<String, bool> =
-        match db::get_setting(pool, "discover_scan_roots_config").await? {
-            Some(json) => serde_json::from_str(&json)
-                .map_err(|e| format!("Invalid scan roots config: {}", e))?,
-            None => HashMap::new(),
-        };
+/// Add a custom scan-root path. The path is stored verbatim and must be
+/// absolute and exist on disk.
+#[tauri::command]
+pub async fn add_scan_root(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    let trimmed = path.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("Path must not be empty".to_string());
+    }
+    let p = Path::new(&trimmed);
+    if !p.is_absolute() {
+        return Err(format!("Path must be absolute: {}", trimmed));
+    }
+    if !p.exists() {
+        return Err(format!("Path does not exist: {}", trimmed));
+    }
+    if !p.is_dir() {
+        return Err(format!("Path is not a directory: {}", trimmed));
+    }
 
-    config.insert(path, enabled);
+    let pool = &state.db;
+    let mut cfg = load_scan_roots_config(pool).await?;
 
-    let json = serde_json::to_string(&config)
-        .map_err(|e| format!("Failed to serialize scan roots config: {}", e))?;
-    db::set_setting(pool, "discover_scan_roots_config", &json).await
+    // Reject duplicates of default roots.
+    let default_paths: std::collections::HashSet<String> = default_scan_roots()
+        .into_iter()
+        .map(|r| r.path)
+        .collect();
+    if default_paths.contains(&trimmed) {
+        return Err(format!(
+            "Path is already a built-in scan root: {}",
+            trimmed
+        ));
+    }
+
+    // Dedup against existing custom paths.
+    if !cfg.custom.iter().any(|p| p == &trimmed) {
+        cfg.custom.push(trimmed.clone());
+    }
+    // Default-enable newly added custom roots.
+    cfg.overrides.insert(trimmed, true);
+
+    save_scan_roots_config(pool, &cfg).await
+}
+
+/// Remove a custom scan-root path. No-op for built-in default paths.
+#[tauri::command]
+pub async fn remove_scan_root(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    let pool = &state.db;
+    let mut cfg = load_scan_roots_config(pool).await?;
+    let before = cfg.custom.len();
+    cfg.custom.retain(|p| p != &path);
+    if cfg.custom.len() == before {
+        // Not a custom root — could be a default; treat as no-op rather than error,
+        // but still remove any per-path override so the default's auto-detected
+        // enabled state is restored.
+        cfg.overrides.remove(&path);
+        return save_scan_roots_config(pool, &cfg).await;
+    }
+    cfg.overrides.remove(&path);
+    save_scan_roots_config(pool, &cfg).await
 }
 
 /// Start a project-discovery scan across the given root directories.
@@ -1481,18 +1614,29 @@ mod tests {
 
     /// Implementation of get_scan_roots that takes a pool directly for testing.
     async fn get_scan_roots_impl(pool: &DbPool) -> Result<Vec<ScanRoot>, String> {
-        let mut roots = default_scan_roots();
+        let cfg = load_scan_roots_config(pool).await?;
 
-        if let Some(json) = db::get_setting(pool, "discover_scan_roots_config").await? {
-            let config: HashMap<String, bool> = serde_json::from_str(&json)
-                .map_err(|e| format!("Invalid scan roots config: {}", e))?;
-            for root in &mut roots {
-                if let Some(&enabled) = config.get(&root.path) {
-                    root.enabled = enabled;
-                }
+        let mut roots = default_scan_roots();
+        let default_paths: std::collections::HashSet<String> =
+            roots.iter().map(|r| r.path.clone()).collect();
+        for custom_path in &cfg.custom {
+            if default_paths.contains(custom_path) {
+                continue;
+            }
+            let exists = Path::new(custom_path).exists();
+            roots.push(ScanRoot {
+                path: custom_path.clone(),
+                label: label_from_path(custom_path),
+                exists,
+                enabled: exists,
+                is_custom: true,
+            });
+        }
+        for root in &mut roots {
+            if let Some(&enabled) = cfg.overrides.get(&root.path) {
+                root.enabled = enabled;
             }
         }
-
         Ok(roots)
     }
 
@@ -1502,18 +1646,123 @@ mod tests {
         path: String,
         enabled: bool,
     ) -> Result<(), String> {
-        let mut config: HashMap<String, bool> =
-            match db::get_setting(pool, "discover_scan_roots_config").await? {
-                Some(json) => serde_json::from_str(&json)
-                    .map_err(|e| format!("Invalid scan roots config: {}", e))?,
-                None => HashMap::new(),
-            };
+        let mut cfg = load_scan_roots_config(pool).await?;
+        cfg.overrides.insert(path, enabled);
+        save_scan_roots_config(pool, &cfg).await
+    }
 
-        config.insert(path, enabled);
+    /// Implementation of add_scan_root that takes a pool directly for testing.
+    async fn add_scan_root_impl(pool: &DbPool, path: String) -> Result<(), String> {
+        let trimmed = path.trim().to_string();
+        if trimmed.is_empty() {
+            return Err("Path must not be empty".to_string());
+        }
+        let p = Path::new(&trimmed);
+        if !p.is_absolute() {
+            return Err(format!("Path must be absolute: {}", trimmed));
+        }
+        if !p.exists() {
+            return Err(format!("Path does not exist: {}", trimmed));
+        }
+        if !p.is_dir() {
+            return Err(format!("Path is not a directory: {}", trimmed));
+        }
+        let mut cfg = load_scan_roots_config(pool).await?;
+        let default_paths: std::collections::HashSet<String> = default_scan_roots()
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        if default_paths.contains(&trimmed) {
+            return Err(format!(
+                "Path is already a built-in scan root: {}",
+                trimmed
+            ));
+        }
+        if !cfg.custom.iter().any(|q| q == &trimmed) {
+            cfg.custom.push(trimmed.clone());
+        }
+        cfg.overrides.insert(trimmed, true);
+        save_scan_roots_config(pool, &cfg).await
+    }
 
-        let json = serde_json::to_string(&config)
-            .map_err(|e| format!("Failed to serialize scan roots config: {}", e))?;
-        db::set_setting(pool, "discover_scan_roots_config", &json).await
+    /// Implementation of remove_scan_root that takes a pool directly for testing.
+    async fn remove_scan_root_impl(pool: &DbPool, path: String) -> Result<(), String> {
+        let mut cfg = load_scan_roots_config(pool).await?;
+        cfg.custom.retain(|p| p != &path);
+        cfg.overrides.remove(&path);
+        save_scan_roots_config(pool, &cfg).await
+    }
+
+    #[tokio::test]
+    async fn test_add_and_remove_custom_scan_root() {
+        let pool = setup_test_db().await;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let custom_path = path_to_string(tmp.path());
+
+        // Add custom root.
+        add_scan_root_impl(&pool, custom_path.clone()).await.unwrap();
+        let roots = get_scan_roots_impl(&pool).await.unwrap();
+        let added = roots.iter().find(|r| r.path == custom_path).unwrap();
+        assert!(added.is_custom, "added root should be marked custom");
+        assert!(added.enabled, "newly added custom root should be enabled");
+        assert!(added.exists, "tempdir should exist");
+
+        // Adding the same path again should be a no-op (no duplicate).
+        add_scan_root_impl(&pool, custom_path.clone()).await.unwrap();
+        let roots2 = get_scan_roots_impl(&pool).await.unwrap();
+        let count = roots2.iter().filter(|r| r.path == custom_path).count();
+        assert_eq!(count, 1, "duplicate add should be deduped");
+
+        // Disable then remove.
+        set_scan_root_enabled_impl(&pool, custom_path.clone(), false)
+            .await
+            .unwrap();
+        remove_scan_root_impl(&pool, custom_path.clone()).await.unwrap();
+        let roots3 = get_scan_roots_impl(&pool).await.unwrap();
+        assert!(
+            !roots3.iter().any(|r| r.path == custom_path),
+            "removed custom root should be gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_scan_root_rejects_invalid_paths() {
+        let pool = setup_test_db().await;
+
+        // Non-absolute path.
+        let err = add_scan_root_impl(&pool, "relative/path".to_string())
+            .await
+            .unwrap_err();
+        assert!(err.contains("absolute"), "expected absolute-path error: {}", err);
+
+        // Non-existent path.
+        let err = add_scan_root_impl(&pool, "/__nonexistent_path_xyz_123__".to_string())
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("does not exist") || err.contains("not a directory"),
+            "expected not-exist error: {}",
+            err
+        );
+
+        // Empty path.
+        let err = add_scan_root_impl(&pool, "  ".to_string()).await.unwrap_err();
+        assert!(err.contains("empty"), "expected empty-path error: {}", err);
+    }
+
+    #[tokio::test]
+    async fn test_legacy_config_format_is_parsed() {
+        let pool = setup_test_db().await;
+
+        // Write legacy format (bare path -> enabled map) directly to settings.
+        let legacy_json = r#"{"/some/path": false}"#;
+        db::set_setting(&pool, "discover_scan_roots_config", legacy_json)
+            .await
+            .unwrap();
+
+        let cfg = load_scan_roots_config(&pool).await.unwrap();
+        assert_eq!(cfg.overrides.get("/some/path"), Some(&false));
+        assert!(cfg.custom.is_empty());
     }
 
     #[tokio::test]
@@ -2124,6 +2373,7 @@ mod tests {
             path: tmp.path().to_string_lossy().into_owned(),
             label: "test".to_string(),
             exists: true,
+            is_custom: false,
             enabled: true,
         };
 
@@ -2174,6 +2424,7 @@ mod tests {
             path: tmp.path().to_string_lossy().into_owned(),
             label: "test".to_string(),
             exists: true,
+            is_custom: false,
             enabled: true,
         };
 

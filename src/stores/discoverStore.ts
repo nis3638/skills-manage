@@ -70,6 +70,8 @@ interface DiscoverState {
   // Actions
   loadScanRoots: () => Promise<void>;
   setScanRootEnabled: (path: string, enabled: boolean) => Promise<void>;
+  addScanRoot: (path: string) => Promise<void>;
+  removeScanRoot: (path: string) => Promise<void>;
   startScan: () => Promise<void>;
   stopScan: () => Promise<void>;
   loadDiscoveredSkills: () => Promise<void>;
@@ -199,6 +201,31 @@ export const useDiscoverStore = create<DiscoverState>((set, get) => ({
         ),
         error: String(err),
       }));
+    }
+  },
+
+  addScanRoot: async (path: string) => {
+    set({ error: null });
+    try {
+      await invoke("add_scan_root", { path });
+      // Reload from backend so we get the canonical label/exists/enabled state.
+      const roots = await invoke<ScanRoot[]>("get_scan_roots");
+      set({ scanRoots: roots });
+    } catch (err) {
+      set({ error: String(err) });
+      throw err;
+    }
+  },
+
+  removeScanRoot: async (path: string) => {
+    set({ error: null });
+    try {
+      await invoke("remove_scan_root", { path });
+      const roots = await invoke<ScanRoot[]>("get_scan_roots");
+      set({ scanRoots: roots });
+    } catch (err) {
+      set({ error: String(err) });
+      throw err;
     }
   },
 

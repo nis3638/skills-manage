@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.9.4 - 2026-04-28
+
+Feature release for the project-discovery scan-roots dialog: users can now add their own scan paths, copy any path to the clipboard, and long paths render with a middle ellipsis instead of overflowing.
+
+### Features
+
+- **Custom scan roots**: new "+ Add path" button in the Discover rescan dialog opens a native directory picker. Added paths are persisted in SQLite (`discover_scan_roots_config`) and merged with the built-in defaults.
+- **Remove custom roots**: each user-added row has a ✕ button to delete it; built-in defaults can still only be enabled/disabled.
+- **Copy path**: every scan-root row now has a copy icon button that writes the full path to the clipboard with a toast confirmation. The path text also shows the full value via the native `title` tooltip on hover.
+
+### Improvements
+
+- The scan-roots persisted config format upgraded from `HashMap<path, enabled>` to `{ overrides, custom }`. Legacy configs are auto-migrated transparently on read.
+- Long paths in the dialog now render with a middle ellipsis (RTL truncation on the head + always-visible basename) and the dialog max width grew from `lg` to `2xl` for better breathing room.
+- Added `min-w-0` constraints throughout the dialog grid/flex chain so the dialog no longer expands past its `max-w` when a path is wider than the available column.
+
+### Backend
+
+- New IPC commands `add_scan_root` and `remove_scan_root` (`src-tauri/src/commands/discover.rs`) with absolute-path / existence / directory validation and dedup against built-in defaults.
+- `ScanRoot` gains an `is_custom: bool` field so the UI can distinguish user-added paths from defaults.
+- New `ScanRootsConfig` struct + `load_scan_roots_config` / `save_scan_roots_config` helpers; `get_scan_roots` and `set_scan_root_enabled` rewritten on top of them.
+
+### Tests
+
+- 3 new Rust tests: `test_add_and_remove_custom_scan_root`, `test_add_scan_root_rejects_invalid_paths`, `test_legacy_config_format_is_parsed`.
+- Existing `ScanRoot` literals in `discover.rs` tests updated for the new field.
+- `src/test/DiscoverView.test.tsx` mock state extended with `addScanRoot` / `removeScanRoot`.
+
 ## 0.9.3 - 2026-04-28
 
 Feature release: the central skills directory is configurable from the UI, and downstream commands honour the configured path.
