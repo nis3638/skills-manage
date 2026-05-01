@@ -74,6 +74,7 @@ pub fn run() {
             commands::settings::add_scan_directory,
             commands::settings::remove_scan_directory,
             commands::settings::set_scan_directory_active,
+            commands::settings::update_scan_directory_path,
             commands::settings::get_setting,
             commands::settings::set_setting,
             commands::settings::set_central_skills_dir,

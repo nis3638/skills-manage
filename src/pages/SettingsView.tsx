@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Plus, Trash2, Pencil, Loader2, FolderOpen, Cpu, Info, Database, Globe, Palette, Droplets, Bot, ChevronDown, ChevronRight, KeyRound } from "lucide-react";
+import { Plus, Trash2, Pencil, Check, X, Loader2, FolderOpen, Cpu, Info, Database, Globe, Palette, Droplets, Bot, ChevronDown, ChevronRight, KeyRound } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
@@ -68,48 +68,147 @@ interface ScanDirectoryRowProps {
   dir: ScanDirectory;
   onRemove: () => void;
   onToggle: (active: boolean) => void;
+  onEditPath: (newPath: string) => Promise<void>;
   isRemoving: boolean;
 }
 
-function ScanDirectoryRow({ dir, onRemove, onToggle, isRemoving }: ScanDirectoryRowProps) {
+function ScanDirectoryRow({ dir, onRemove, onToggle, onEditPath, isRemoving }: ScanDirectoryRowProps) {
   const { t } = useTranslation();
   const action = dir.is_active ? t("settings.enabled") : t("settings.disabled");
+
+  const [isEditing, setIsEditing] = useState(false);
+  const [editValue, setEditValue] = useState(dir.path);
+  const [isSaving, setIsSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  function startEdit() {
+    setEditValue(formatPathForDisplay(dir.path));
+    setEditError(null);
+    setIsEditing(true);
+  }
+
+  function cancelEdit() {
+    setIsEditing(false);
+    setEditError(null);
+  }
+
+  async function saveEdit() {
+    const trimmed = editValue.trim();
+    if (!trimmed) {
+      setEditError(t("addDir.pathRequired"));
+      return;
+    }
+    setIsSaving(true);
+    setEditError(null);
+    try {
+      await onEditPath(trimmed);
+      setIsEditing(false);
+    } catch (err) {
+      setEditError(String(err));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  function handleEditKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter" && !isSaving) {
+      saveEdit();
+    } else if (e.key === "Escape" && !isSaving) {
+      cancelEdit();
+    }
+  }
+
   return (
     <div className="flex items-center gap-3 py-2.5 px-4 border-b border-border/50 last:border-0">
       <FolderOpen className="size-4 text-muted-foreground shrink-0" />
       <div className="flex-1 min-w-0">
-        <div className="text-sm font-medium truncate">{formatPathForDisplay(dir.path)}</div>
-        {dir.label && (
-          <div className="text-xs text-muted-foreground mt-0.5">{dir.label}</div>
-        )}
-        {dir.is_builtin && (
-          <div className="text-xs text-muted-foreground mt-0.5">{t("settings.builtinDir")}</div>
+        {isEditing ? (
+          <div className="space-y-1">
+            <Input
+              value={editValue}
+              onChange={(e) => {
+                setEditValue(e.target.value);
+                if (editError) setEditError(null);
+              }}
+              onKeyDown={handleEditKeyDown}
+              placeholder={t("settings.editDirPlaceholder")}
+              disabled={isSaving}
+              autoFocus
+              className="h-8 text-sm"
+            />
+            {editError && (
+              <p className="text-xs text-destructive" role="alert">{editError}</p>
+            )}
+          </div>
+        ) : (
+          <>
+            <div className="text-sm font-medium truncate">{formatPathForDisplay(dir.path)}</div>
+            {dir.label && (
+              <div className="text-xs text-muted-foreground mt-0.5">{dir.label}</div>
+            )}
+            {dir.is_builtin && (
+              <div className="text-xs text-muted-foreground mt-0.5">{t("settings.builtinDir")}</div>
+            )}
+          </>
         )}
       </div>
       <div className="flex items-center gap-2 shrink-0">
-        {/* Toggle for non-builtin dirs (built-in dirs are always active) */}
-        {!dir.is_builtin && (
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs text-muted-foreground">
-              {action}
-            </span>
-            <Switch
-              checked={dir.is_active}
-              onCheckedChange={onToggle}
-              aria-label={t("settings.enableDirLabel", { action, path: dir.path })}
-            />
-          </div>
-        )}
-        {/* Remove button for non-builtin dirs */}
-        {!dir.is_builtin && (
-          <InlineConfirmAction
-            onConfirm={onRemove}
-            isLoading={isRemoving}
-            idleAriaLabel={t("settings.removeDirLabel", { path: dir.path })}
-            idleTitle={t("settings.removeDirLabel", { path: dir.path })}
-            confirmLabel={t("common.confirmDelete")}
-            icon={<Trash2 className="size-3.5" />}
-          />
+        {isEditing ? (
+          <>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={saveEdit}
+              disabled={isSaving}
+              aria-label={t("settings.editDirSave")}
+              title={t("settings.editDirSave")}
+            >
+              {isSaving ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={cancelEdit}
+              disabled={isSaving}
+              aria-label={t("settings.editDirCancel")}
+              title={t("settings.editDirCancel")}
+            >
+              <X className="size-3.5" />
+            </Button>
+          </>
+        ) : (
+          <>
+            {/* Toggle (available for both built-in and custom dirs) */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-muted-foreground">{action}</span>
+              <Switch
+                checked={dir.is_active}
+                onCheckedChange={onToggle}
+                aria-label={t("settings.enableDirLabel", { action, path: dir.path })}
+              />
+            </div>
+            {/* Edit path (available for both built-in and custom dirs) */}
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={startEdit}
+              aria-label={t("settings.editDirLabel", { path: dir.path })}
+              title={t("settings.editDirLabel", { path: dir.path })}
+            >
+              <Pencil className="size-3.5" />
+            </Button>
+            {/* Remove button for non-builtin dirs only */}
+            {!dir.is_builtin && (
+              <InlineConfirmAction
+                onConfirm={onRemove}
+                isLoading={isRemoving}
+                idleAriaLabel={t("settings.removeDirLabel", { path: dir.path })}
+                idleTitle={t("settings.removeDirLabel", { path: dir.path })}
+                confirmLabel={t("common.confirmDelete")}
+                icon={<Trash2 className="size-3.5" />}
+              />
+            )}
+          </>
         )}
       </div>
     </div>
@@ -172,6 +271,7 @@ export function SettingsView() {
   const addScanDirectory = useSettingsStore((s) => s.addScanDirectory);
   const removeScanDirectory = useSettingsStore((s) => s.removeScanDirectory);
   const toggleScanDirectory = useSettingsStore((s) => s.toggleScanDirectory);
+  const updateScanDirectoryPath = useSettingsStore((s) => s.updateScanDirectoryPath);
   const addCustomAgent = useSettingsStore((s) => s.addCustomAgent);
   const updateCustomAgent = useSettingsStore((s) => s.updateCustomAgent);
   const removeCustomAgent = useSettingsStore((s) => s.removeCustomAgent);
@@ -336,11 +436,11 @@ export function SettingsView() {
     }
   }
 
-  async function handleRemoveDirectory(path: string) {
+  async function handleRemoveDirectory(id: number, path: string) {
     setRemovingDir(path);
     setScanDirError(null);
     try {
-      await removeScanDirectory(path);
+      await removeScanDirectory(id);
       // Trigger rescan after removing a directory.
       await refreshCounts();
       toast.success(t("common.delete") + " ✓");
@@ -353,16 +453,39 @@ export function SettingsView() {
   }
 
   /**
-   * Toggle the active state of a custom scan directory.
+   * Toggle the active state of a scan directory (built-in or custom) by id.
    * Persists the change to the backend via set_scan_directory_active command.
    */
-  async function handleToggleDirectory(path: string, active: boolean) {
+  async function handleToggleDirectory(id: number, active: boolean) {
     setScanDirError(null);
     try {
-      await toggleScanDirectory(path, active);
+      await toggleScanDirectory(id, active);
+      // Trigger rescan so disabled/enabled paths take effect immediately.
+      await refreshCounts();
     } catch (err) {
       setScanDirError(String(err));
       toast.error(String(err));
+    }
+  }
+
+  /**
+   * Edit the path of a scan directory (built-in or custom) by id.
+   * Persists the change to the backend via update_scan_directory_path command.
+   * Throws on failure so the inline edit form can display the error.
+   */
+  async function handleEditDirectoryPath(id: number, newPath: string) {
+    setScanDirError(null);
+    try {
+      await updateScanDirectoryPath(id, newPath);
+      // Editing a built-in scan directory also rewrites the matching agent's
+      // `global_skills_dir`. Reload agents (rescan) so the sidebar and the
+      // platform views immediately reflect the new path.
+      await rescan();
+      toast.success(t("settings.editDirSaved") + " ✓");
+    } catch (err) {
+      setScanDirError(String(err));
+      toast.error(String(err));
+      throw err;
     }
   }
 
@@ -792,14 +915,21 @@ export function SettingsView() {
                   {customDirs.length > 0 && (
                     <div className="rounded-lg border border-border overflow-hidden">
                       {customDirs.map((dir) => (
-                        <ScanDirectoryRow key={dir.id} dir={dir} onRemove={() => handleRemoveDirectory(dir.path)} onToggle={(active) => handleToggleDirectory(dir.path, active)} isRemoving={removingDir === dir.path} />
+                        <ScanDirectoryRow
+                          key={dir.id}
+                          dir={dir}
+                          onRemove={() => handleRemoveDirectory(dir.id, dir.path)}
+                          onToggle={(active) => handleToggleDirectory(dir.id, active)}
+                          onEditPath={(newPath) => handleEditDirectoryPath(dir.id, newPath)}
+                          isRemoving={removingDir === dir.path}
+                        />
                       ))}
                     </div>
                   )}
                   {customDirs.length === 0 && (
                     <p className="text-xs text-muted-foreground text-center py-2">{t("settings.noDirs")}</p>
                   )}
-                  {/* Built-in dirs — collapsible, two-column */}
+                  {/* Built-in dirs — collapsible, full row layout (toggle + edit). */}
                   {builtinDirs.length > 0 && (
                     <div>
                       <button
@@ -810,13 +940,16 @@ export function SettingsView() {
                         <span>{t("settings.builtinDir")} ({builtinDirs.length})</span>
                       </button>
                       {showBuiltinDirs && (
-                        <div className="grid grid-cols-2 gap-1.5 mt-2">
+                        <div className="rounded-lg border border-border overflow-hidden mt-2">
                           {builtinDirs.map((dir) => (
-                            <div key={dir.id} className="flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-muted/30 text-xs text-muted-foreground truncate">
-                              <FolderOpen className="size-3 shrink-0" />
-                              <span className="truncate">{formatPathForDisplay(dir.path)}</span>
-                              {dir.label && <span className="shrink-0 opacity-60">· {dir.label}</span>}
-                            </div>
+                            <ScanDirectoryRow
+                              key={dir.id}
+                              dir={dir}
+                              onRemove={() => handleRemoveDirectory(dir.id, dir.path)}
+                              onToggle={(active) => handleToggleDirectory(dir.id, active)}
+                              onEditPath={(newPath) => handleEditDirectoryPath(dir.id, newPath)}
+                              isRemoving={removingDir === dir.path}
+                            />
                           ))}
                         </div>
                       )}

@@ -15,8 +15,9 @@ interface SettingsState {
   // Actions — scan directories
   loadScanDirectories: () => Promise<void>;
   addScanDirectory: (path: string, label?: string) => Promise<ScanDirectory>;
-  removeScanDirectory: (path: string) => Promise<void>;
-  toggleScanDirectory: (path: string, active: boolean) => Promise<void>;
+  removeScanDirectory: (id: number) => Promise<void>;
+  toggleScanDirectory: (id: number, active: boolean) => Promise<void>;
+  updateScanDirectoryPath: (id: number, newPath: string) => Promise<string>;
 
   // Actions — GitHub PAT
   loadGitHubPat: () => Promise<void>;
@@ -73,26 +74,43 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   },
 
   /**
-   * Remove a custom scan directory by path.
+   * Remove a custom scan directory by id.
    */
-  removeScanDirectory: async (path: string) => {
-    await invoke<void>("remove_scan_directory", { path });
+  removeScanDirectory: async (id: number) => {
+    await invoke<void>("remove_scan_directory", { id });
     set((state) => ({
-      scanDirectories: state.scanDirectories.filter((d) => d.path !== path),
+      scanDirectories: state.scanDirectories.filter((d) => d.id !== id),
     }));
   },
 
   /**
-   * Toggle the active state of a custom scan directory.
+   * Toggle the active state of a scan directory (built-in or custom).
    * Persists the change to the backend database.
    */
-  toggleScanDirectory: async (path: string, active: boolean) => {
-    await invoke<void>("set_scan_directory_active", { path, isActive: active });
+  toggleScanDirectory: async (id: number, active: boolean) => {
+    await invoke<void>("set_scan_directory_active", { id, isActive: active });
     set((state) => ({
       scanDirectories: state.scanDirectories.map((d) =>
-        d.path === path ? { ...d, is_active: active } : d
+        d.id === id ? { ...d, is_active: active } : d
       ),
     }));
+  },
+
+  /**
+   * Update the `path` of a scan directory (built-in or custom) by id.
+   * Returns the persisted (expanded) path.
+   */
+  updateScanDirectoryPath: async (id: number, newPath: string) => {
+    const persistedPath = await invoke<string>("update_scan_directory_path", {
+      id,
+      newPath,
+    });
+    set((state) => ({
+      scanDirectories: state.scanDirectories.map((d) =>
+        d.id === id ? { ...d, path: persistedPath } : d
+      ),
+    }));
+    return persistedPath;
   },
 
   // ── GitHub PAT ────────────────────────────────────────────────────────────

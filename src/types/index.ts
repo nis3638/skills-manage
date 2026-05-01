@@ -148,6 +148,11 @@ export interface ScanDirectory {
   is_active: boolean;
   is_builtin: boolean;
   added_at: string;
+  /**
+   * For built-in rows, the id of the agent that owns this directory (1:1
+   * mapping). NULL/undefined for user-added (custom) rows.
+   */
+  agent_id?: string | null;
 }
 
 // ─── Discover Types ───────────────────────────────────────────────────────────

@@ -81,6 +81,7 @@ function setupMocks({
   addScanDirectory = vi.fn(),
   removeScanDirectory = vi.fn(),
   toggleScanDirectory = vi.fn(),
+  updateScanDirectoryPath = vi.fn(),
   addCustomAgent = vi.fn(),
   updateCustomAgent = vi.fn(),
   removeCustomAgent = vi.fn(),
@@ -106,6 +107,7 @@ function setupMocks({
       addScanDirectory,
       removeScanDirectory,
       toggleScanDirectory,
+      updateScanDirectoryPath,
       addCustomAgent,
       updateCustomAgent,
       removeCustomAgent,
@@ -333,7 +335,7 @@ describe("SettingsView", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
 
     await waitFor(() => {
-      expect(removeScanDirectory).toHaveBeenCalledWith(mockCustomDir.path);
+      expect(removeScanDirectory).toHaveBeenCalledWith(mockCustomDir.id);
     });
   });
 

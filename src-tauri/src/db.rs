@@ -84,6 +84,11 @@ pub struct ScanDirectory {
     pub is_active: bool,
     pub is_builtin: bool,
     pub added_at: String,
+    /// For built-in rows, the id of the agent this directory belongs to. Each
+    /// built-in agent has exactly one row, so two agents that happen to share a
+    /// `global_skills_dir` (e.g. codex and central) appear as two distinct
+    /// scan_directory rows. NULL for user-added (custom) rows.
+    pub agent_id: Option<String>,
 }
 
 // ─── Pool Creation ────────────────────────────────────────────────────────────
@@ -249,15 +254,21 @@ pub async fn init_database(pool: &DbPool) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    // scan_directories table
+    // scan_directories table.
+    //
+    // Note: `path` is intentionally NOT UNIQUE. Two built-in agents that share
+    // the same `global_skills_dir` (e.g. codex and central both default to
+    // `~/.agents/skills`) each get their own row keyed by `agent_id`, so the
+    // user can edit them independently from Settings.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS scan_directories (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            path       TEXT NOT NULL UNIQUE,
+            path       TEXT NOT NULL,
             label      TEXT,
             is_active  BOOLEAN NOT NULL DEFAULT 1,
             is_builtin BOOLEAN NOT NULL DEFAULT 0,
-            added_at   TEXT NOT NULL
+            added_at   TEXT NOT NULL,
+            agent_id   TEXT
         )",
     )
     .execute(pool)
@@ -409,6 +420,24 @@ pub async fn init_database(pool: &DbPool) -> Result<(), String> {
     )
     .await?;
 
+    // Add agent_id to scan_directories on databases created before the 1:1
+    // agent ↔ scan-directory mapping was introduced.
+    ensure_column(
+        pool,
+        "scan_directories",
+        "agent_id",
+        "ALTER TABLE scan_directories ADD COLUMN agent_id TEXT",
+    )
+    .await?;
+
+    // Drop the legacy UNIQUE(path) constraint on scan_directories if it still
+    // exists. UNIQUE on path is incompatible with the 1:1 mapping (two built-in
+    // agents may share the same default path) and is recreated as a non-unique
+    // column in CREATE TABLE above. SQLite doesn't support `ALTER TABLE DROP
+    // CONSTRAINT`, so we detect the constraint by parsing `sqlite_master` and
+    // recreate the table without it.
+    drop_scan_directories_unique_path_if_present(pool).await?;
+
     // Seed built-in agents (INSERT OR IGNORE so repeated init is safe)
     seed_builtin_agents(pool).await?;
 
@@ -434,10 +463,10 @@ async fn seed_builtin_agents(pool: &DbPool) -> Result<(), String> {
              ON CONFLICT(id) DO UPDATE SET
               display_name = excluded.display_name,
               category = excluded.category,
-              global_skills_dir = CASE
-                WHEN agents.id = 'central' THEN agents.global_skills_dir
-                ELSE excluded.global_skills_dir
-              END,
+              -- Preserve any user-edited global_skills_dir across launches
+              -- (originally only the central agent was preserved; we now treat
+              --  every builtin agent the same so edits made via Settings stick).
+              global_skills_dir = agents.global_skills_dir,
               project_skills_dir = excluded.project_skills_dir,
               icon_name = excluded.icon_name",
         )
@@ -472,41 +501,125 @@ async fn seed_builtin_agents(pool: &DbPool) -> Result<(), String> {
     Ok(())
 }
 
-/// Seed `scan_directories` with one row per unique `global_skills_dir` path
-/// across all built-in agents.  Rows are marked `is_builtin = 1` and cannot
-/// be removed by the user.  `INSERT OR IGNORE` keeps the operation idempotent:
-/// if two built-in agents share the same path (codex and central both use
-/// `~/.agents/skills`) only the first insert takes effect.
+/// Seed `scan_directories` with **one row per built-in agent** (1:1 mapping).
+///
+/// Two agents that happen to share a default path (e.g. codex and central
+/// both point to `~/.agents/skills`) each receive their own row, so the user
+/// can enable/disable them and edit the path independently in Settings.
+///
+/// Idempotency: keyed on `agent_id`, so repeated launches never produce
+/// duplicate rows. User customizations (path edits, is_active toggle, label)
+/// are preserved across launches.
+///
+/// Migration: legacy rows seeded under the old "one row per unique path"
+/// model have a NULL `agent_id`. We backfill these by matching the row's
+/// `path` against the current built-in agents' `global_skills_dir`, prefer-
+/// ring an exact match. The first agent that resolves to that path adopts
+/// the existing row; the rest receive freshly inserted rows.
+///
+/// Cleanup: rows whose `agent_id` no longer corresponds to any built-in
+/// agent in `builtin_agents()` are deleted (handles the case where a
+/// built-in agent has been removed from code).
 async fn seed_builtin_scan_directories(pool: &DbPool) -> Result<(), String> {
     let now = Utc::now().to_rfc3339();
-    for agent in builtin_agents() {
-        sqlx::query(
-            "INSERT OR IGNORE INTO scan_directories
-             (path, label, is_active, is_builtin, added_at)
-             VALUES (?, ?, 1, 1, ?)",
+    let agents = builtin_agents();
+
+    // Read agents from the DB so seed reflects user-edited `global_skills_dir`
+    // values (preserved by `seed_builtin_agents` via the `ON CONFLICT DO
+    // UPDATE` clause).
+    let db_agent_paths: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, global_skills_dir FROM agents WHERE is_builtin = 1")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    let path_for_agent = |agent_id: &str| -> Option<String> {
+        db_agent_paths
+            .iter()
+            .find(|(id, _)| id == agent_id)
+            .map(|(_, p)| p.clone())
+    };
+
+    // ── 1. Backfill legacy rows (is_builtin=1, agent_id IS NULL) ──────────
+    // Existing installs may have rows seeded by the old "unique path" logic.
+    // Adopt one of these per matching agent (first-come) to avoid producing
+    // duplicates on the next step.
+    let legacy_rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT id, path FROM scan_directories WHERE is_builtin = 1 AND agent_id IS NULL",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let mut adopted_row_ids: std::collections::HashSet<i64> = Default::default();
+    for agent in &agents {
+        // The agent's current path comes from the DB if present, else the
+        // hardcoded default (fresh install just before agents have been seeded
+        // — though the call ordering in init_database makes this unlikely).
+        let target_path = path_for_agent(&agent.id).unwrap_or_else(|| agent.global_skills_dir.clone());
+        if let Some((row_id, _)) = legacy_rows
+            .iter()
+            .find(|(id, p)| !adopted_row_ids.contains(id) && p == &target_path)
+        {
+            sqlx::query(
+                "UPDATE scan_directories SET agent_id = ?, label = ? WHERE id = ?",
+            )
+            .bind(&agent.id)
+            .bind(&agent.display_name)
+            .bind(row_id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+            adopted_row_ids.insert(*row_id);
+        }
+    }
+
+    // Any leftover legacy rows (no matching agent) become stale built-in rows
+    // with NULL agent_id and will be cleaned up below.
+
+    // ── 2. Insert one row per built-in agent that doesn't yet have one ────
+    for agent in &agents {
+        let exists: Option<(i64,)> = sqlx::query_as(
+            "SELECT id FROM scan_directories WHERE is_builtin = 1 AND agent_id = ?",
         )
-        .bind(&agent.global_skills_dir)
+        .bind(&agent.id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        if exists.is_some() {
+            continue;
+        }
+        let path = path_for_agent(&agent.id).unwrap_or_else(|| agent.global_skills_dir.clone());
+        sqlx::query(
+            "INSERT INTO scan_directories (path, label, is_active, is_builtin, added_at, agent_id)
+             VALUES (?, ?, 1, 1, ?, ?)",
+        )
+        .bind(&path)
         .bind(&agent.display_name)
         .bind(&now)
+        .bind(&agent.id)
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
     }
 
-    // Remove builtin scan directories that no longer exist in code
-    let builtin_paths: std::collections::HashSet<String> = builtin_agents()
-        .into_iter()
-        .map(|a| a.global_skills_dir)
-        .collect();
-    let all_db_dirs: Vec<(String,)> =
-        sqlx::query_as("SELECT path FROM scan_directories WHERE is_builtin = 1")
+    // ── 3. Cleanup: remove built-in rows whose agent_id no longer maps to
+    //     any current built-in agent (handles agents removed from code), as
+    //     well as legacy NULL-agent_id rows that nothing adopted in step 1.
+    let valid_ids: std::collections::HashSet<String> =
+        agents.iter().map(|a| a.id.clone()).collect();
+    let all_builtin: Vec<(i64, Option<String>)> =
+        sqlx::query_as("SELECT id, agent_id FROM scan_directories WHERE is_builtin = 1")
             .fetch_all(pool)
             .await
             .map_err(|e| e.to_string())?;
-    for (path,) in &all_db_dirs {
-        if !builtin_paths.contains(path) {
-            sqlx::query("DELETE FROM scan_directories WHERE path = ? AND is_builtin = 1")
-                .bind(path)
+    for (row_id, agent_id) in &all_builtin {
+        let keep = match agent_id {
+            Some(id) => valid_ids.contains(id),
+            None => false,
+        };
+        if !keep {
+            sqlx::query("DELETE FROM scan_directories WHERE id = ?")
+                .bind(row_id)
                 .execute(pool)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -553,6 +666,78 @@ async fn seed_builtin_registries(pool: &DbPool) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+/// Drop the legacy `UNIQUE(path)` constraint on `scan_directories` if present.
+///
+/// Older versions of the schema declared `path TEXT NOT NULL UNIQUE`, which
+/// conflicts with the 1:1 agent ↔ scan-directory mapping (two built-in agents
+/// may share the same default path). SQLite cannot drop column constraints in
+/// place, so we detect the constraint by inspecting `sqlite_master` and, when
+/// found, recreate the table without it while preserving all data.
+async fn drop_scan_directories_unique_path_if_present(pool: &DbPool) -> Result<(), String> {
+    let row = sqlx::query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'scan_directories'")
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let Some(row) = row else {
+        // Table doesn't exist yet (will be created by CREATE TABLE IF NOT
+        // EXISTS earlier in this function). Nothing to migrate.
+        return Ok(());
+    };
+    let sql: String = row.try_get("sql").map_err(|e| e.to_string())?;
+
+    // Two historical phrasings of the constraint:
+    //   path TEXT NOT NULL UNIQUE
+    //   "path" TEXT NOT NULL UNIQUE
+    // We treat any "UNIQUE" appearance immediately following the path column
+    // (case-insensitive) as legacy.
+    let lower = sql.to_lowercase();
+    let has_unique = lower.contains("path text not null unique")
+        || lower.contains("\"path\" text not null unique");
+    if !has_unique {
+        return Ok(());
+    }
+
+    // Recreate without UNIQUE. Use a transaction so a failure leaves the
+    // existing table intact.
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    sqlx::query(
+        "CREATE TABLE scan_directories_new (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            path       TEXT NOT NULL,
+            label      TEXT,
+            is_active  BOOLEAN NOT NULL DEFAULT 1,
+            is_builtin BOOLEAN NOT NULL DEFAULT 0,
+            added_at   TEXT NOT NULL,
+            agent_id   TEXT
+        )",
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "INSERT INTO scan_directories_new (id, path, label, is_active, is_builtin, added_at, agent_id)
+         SELECT id, path, label, is_active, is_builtin, added_at, agent_id FROM scan_directories",
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query("DROP TABLE scan_directories")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    sqlx::query("ALTER TABLE scan_directories_new RENAME TO scan_directories")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1629,15 +1814,30 @@ pub async fn get_scan_directories(pool: &DbPool) -> Result<Vec<ScanDirectory>, S
 }
 
 /// Add a new scan directory entry (non-builtin by default).
+///
+/// Rejects the insert if any existing row already uses the same path. The
+/// `UNIQUE(path)` SQL constraint was dropped to allow built-in agents that
+/// share a default path to each have their own row, so uniqueness for
+/// user-added dirs is enforced here in code instead.
 pub async fn add_scan_directory(
     pool: &DbPool,
     path: &str,
     label: Option<&str>,
 ) -> Result<ScanDirectory, String> {
+    let duplicate: Option<(i64,)> =
+        sqlx::query_as("SELECT id FROM scan_directories WHERE path = ?")
+            .bind(path)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    if duplicate.is_some() {
+        return Err(format!("Scan directory '{}' already exists", path));
+    }
+
     let now = Utc::now().to_rfc3339();
-    sqlx::query(
-        "INSERT INTO scan_directories (path, label, is_active, is_builtin, added_at)
-         VALUES (?, ?, 1, 0, ?)",
+    let result = sqlx::query(
+        "INSERT INTO scan_directories (path, label, is_active, is_builtin, added_at, agent_id)
+         VALUES (?, ?, 1, 0, ?, NULL)",
     )
     .bind(path)
     .bind(label)
@@ -1646,30 +1846,34 @@ pub async fn add_scan_directory(
     .await
     .map_err(|e| e.to_string())?;
 
-    sqlx::query_as::<_, ScanDirectory>("SELECT * FROM scan_directories WHERE path = ?")
-        .bind(path)
+    let new_id = result.last_insert_rowid();
+    sqlx::query_as::<_, ScanDirectory>("SELECT * FROM scan_directories WHERE id = ?")
+        .bind(new_id)
         .fetch_one(pool)
         .await
         .map_err(|e| e.to_string())
 }
 
-/// Remove a scan directory. Returns an error if the directory is builtin.
-pub async fn remove_scan_directory(pool: &DbPool, path: &str) -> Result<(), String> {
-    let row = sqlx::query("SELECT is_builtin FROM scan_directories WHERE path = ?")
-        .bind(path)
+/// Remove a scan directory by id. Returns an error if the directory is builtin.
+pub async fn remove_scan_directory_by_id(pool: &DbPool, id: i64) -> Result<(), String> {
+    let row = sqlx::query("SELECT is_builtin FROM scan_directories WHERE id = ?")
+        .bind(id)
         .fetch_optional(pool)
         .await
         .map_err(|e| e.to_string())?;
 
     match row {
-        None => Err(format!("Scan directory '{}' not found", path)),
+        None => Err(format!("Scan directory id {} not found", id)),
         Some(r) => {
             let is_builtin: bool = r.try_get("is_builtin").map_err(|e| e.to_string())?;
             if is_builtin {
-                return Err(format!("Cannot remove built-in scan directory '{}'", path));
+                return Err(format!(
+                    "Cannot remove built-in scan directory id {}",
+                    id
+                ));
             }
-            sqlx::query("DELETE FROM scan_directories WHERE path = ?")
-                .bind(path)
+            sqlx::query("DELETE FROM scan_directories WHERE id = ?")
+                .bind(id)
                 .execute(pool)
                 .await
                 .map(|_| ())
@@ -1678,19 +1882,91 @@ pub async fn remove_scan_directory(pool: &DbPool, path: &str) -> Result<(), Stri
     }
 }
 
-/// Toggle the `is_active` flag on a scan directory.
-pub async fn toggle_scan_directory(
+/// Toggle the `is_active` flag on a scan directory by id.
+pub async fn toggle_scan_directory_by_id(
     pool: &DbPool,
-    path: &str,
+    id: i64,
     is_active: bool,
 ) -> Result<(), String> {
-    sqlx::query("UPDATE scan_directories SET is_active = ? WHERE path = ?")
+    let result = sqlx::query("UPDATE scan_directories SET is_active = ? WHERE id = ?")
         .bind(is_active)
-        .bind(path)
+        .bind(id)
         .execute(pool)
         .await
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if result.rows_affected() == 0 {
+        return Err(format!("Scan directory id {} not found", id));
+    }
+    Ok(())
+}
+
+/// Update the `path` of a scan directory (built-in or custom) by id.
+///
+/// Returns an error if the row does not exist or if `new_path` is already
+/// used by another row (`is_builtin` is preserved — editing a built-in row
+/// keeps it built-in).
+///
+/// For built-in rows the row's `agent_id` identifies the single agent this
+/// directory belongs to; that agent's `global_skills_dir` is updated to
+/// match, so the sidebar and the scanner stay in sync with the user's edit.
+/// Other agents that happen to share the old path are left untouched, which
+/// preserves the 1:1 mapping between built-in scan directories and agents.
+pub async fn update_scan_directory_path_by_id(
+    pool: &DbPool,
+    id: i64,
+    new_path: &str,
+) -> Result<(), String> {
+    let row = sqlx::query(
+        "SELECT path, is_builtin, agent_id FROM scan_directories WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let Some(row) = row else {
+        return Err(format!("Scan directory id {} not found", id));
+    };
+    let old_path: String = row.try_get("path").map_err(|e| e.to_string())?;
+    let is_builtin: bool = row.try_get("is_builtin").map_err(|e| e.to_string())?;
+    let agent_id: Option<String> = row.try_get("agent_id").map_err(|e| e.to_string())?;
+
+    if old_path == new_path {
+        return Ok(());
+    }
+
+    let duplicate: Option<(i64,)> =
+        sqlx::query_as("SELECT id FROM scan_directories WHERE path = ? AND id != ?")
+            .bind(new_path)
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    if duplicate.is_some() {
+        return Err(format!(
+            "Scan directory path '{}' is already in use",
+            new_path
+        ));
+    }
+
+    sqlx::query("UPDATE scan_directories SET path = ? WHERE id = ?")
+        .bind(new_path)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if is_builtin {
+        if let Some(agent_id) = agent_id {
+            sqlx::query("UPDATE agents SET global_skills_dir = ? WHERE id = ?")
+                .bind(new_path)
+                .bind(&agent_id)
+                .execute(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
 }
 
 // ─── Discovered Skills ────────────────────────────────────────────────────────
@@ -2328,15 +2604,11 @@ mod tests {
 
     // ── Scan Directories ──────────────────────────────────────────────────────
 
-    /// Returns the number of *unique* global_skills_dir paths across all
-    /// built-in agents.  This is the number of rows that seed_builtin_scan_directories
-    /// inserts (codex and central share ~/.agents/skills, so the count is 10).
+    /// Returns the number of built-in scan_directory rows seeded on init.
+    /// With the 1:1 agent ↔ scan-directory mapping there is exactly one row
+    /// per built-in agent.
     fn expected_builtin_scan_dir_count() -> usize {
-        let mut paths = std::collections::HashSet::new();
-        for agent in builtin_agents() {
-            paths.insert(agent.global_skills_dir);
-        }
-        paths.len()
+        builtin_agents().len()
     }
 
     #[tokio::test]
@@ -2345,7 +2617,7 @@ mod tests {
         let dirs = get_scan_directories(&pool).await.unwrap();
         let builtin_count = expected_builtin_scan_dir_count();
 
-        // Expect exactly one row per unique global_skills_dir across built-in agents.
+        // Expect exactly one row per built-in agent (1:1 mapping).
         assert_eq!(
             dirs.len(),
             builtin_count,
@@ -2354,7 +2626,8 @@ mod tests {
             dirs.len()
         );
 
-        // Every seeded row must be marked as built-in and active.
+        // Every seeded row must be marked as built-in, active, and bound to
+        // a single agent.
         for dir in &dirs {
             assert!(
                 dir.is_builtin,
@@ -2366,17 +2639,23 @@ mod tests {
                 "Seeded scan directory '{}' must be active by default",
                 dir.path
             );
+            assert!(
+                dir.agent_id.is_some(),
+                "Seeded scan directory '{}' must have an agent_id",
+                dir.path
+            );
         }
 
-        // The paths must match the unique global_skills_dir values.
-        let seeded_paths: std::collections::HashSet<&str> =
-            dirs.iter().map(|d| d.path.as_str()).collect();
+        // Every built-in agent must own exactly one row.
+        let dir_agents: std::collections::HashSet<String> = dirs
+            .iter()
+            .filter_map(|d| d.agent_id.clone())
+            .collect();
         for agent in builtin_agents() {
             assert!(
-                seeded_paths.contains(agent.global_skills_dir.as_str()),
-                "Built-in agent '{}' global_skills_dir '{}' must be in scan_directories",
-                agent.id,
-                agent.global_skills_dir
+                dir_agents.contains(&agent.id),
+                "Built-in agent '{}' must own a scan_directory row",
+                agent.id
             );
         }
     }
@@ -2405,6 +2684,18 @@ mod tests {
         assert_eq!(dir.label.as_deref(), Some("My Project"));
         assert!(dir.is_active);
         assert!(!dir.is_builtin);
+        assert!(dir.agent_id.is_none(), "custom dirs must have NULL agent_id");
+    }
+
+    #[tokio::test]
+    async fn test_add_scan_directory_rejects_duplicates() {
+        let pool = setup_test_db().await;
+        add_scan_directory(&pool, "/tmp/dup", None).await.unwrap();
+        let result = add_scan_directory(&pool, "/tmp/dup", None).await;
+        assert!(
+            result.is_err(),
+            "Adding the same path twice must be rejected"
+        );
     }
 
     #[tokio::test]
@@ -2429,12 +2720,10 @@ mod tests {
     #[tokio::test]
     async fn test_remove_scan_directory() {
         let pool = setup_test_db().await;
-        add_scan_directory(&pool, "/tmp/removable", None)
+        let dir = add_scan_directory(&pool, "/tmp/removable", None)
             .await
             .unwrap();
-        remove_scan_directory(&pool, "/tmp/removable")
-            .await
-            .unwrap();
+        remove_scan_directory_by_id(&pool, dir.id).await.unwrap();
 
         let dirs = get_scan_directories(&pool).await.unwrap();
         // Built-in dirs remain; only the custom one is removed.
@@ -2446,18 +2735,13 @@ mod tests {
     #[tokio::test]
     async fn test_cannot_remove_builtin_scan_directory() {
         let pool = setup_test_db().await;
-        // Manually insert a builtin directory
-        let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO scan_directories (path, is_active, is_builtin, added_at)
-             VALUES ('/builtin/path', 1, 1, ?)",
-        )
-        .bind(&now)
-        .execute(&pool)
-        .await
-        .unwrap();
+        let dirs = get_scan_directories(&pool).await.unwrap();
+        let builtin = dirs
+            .iter()
+            .find(|d| d.is_builtin)
+            .expect("expected at least one builtin row");
 
-        let result = remove_scan_directory(&pool, "/builtin/path").await;
+        let result = remove_scan_directory_by_id(&pool, builtin.id).await;
         assert!(
             result.is_err(),
             "Should not remove a builtin scan directory"
@@ -2467,23 +2751,23 @@ mod tests {
     #[tokio::test]
     async fn test_remove_nonexistent_scan_directory_returns_error() {
         let pool = setup_test_db().await;
-        let result = remove_scan_directory(&pool, "/nonexistent/path").await;
+        let result = remove_scan_directory_by_id(&pool, 999_999).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_toggle_scan_directory() {
         let pool = setup_test_db().await;
-        add_scan_directory(&pool, "/tmp/toggle-dir", None)
+        let dir = add_scan_directory(&pool, "/tmp/toggle-dir", None)
             .await
             .unwrap();
-        toggle_scan_directory(&pool, "/tmp/toggle-dir", false)
+        toggle_scan_directory_by_id(&pool, dir.id, false)
             .await
             .unwrap();
 
         let dirs = get_scan_directories(&pool).await.unwrap();
-        let dir = dirs.iter().find(|d| d.path == "/tmp/toggle-dir").unwrap();
-        assert!(!dir.is_active);
+        let updated = dirs.iter().find(|d| d.id == dir.id).unwrap();
+        assert!(!updated.is_active);
     }
 
     // ── Settings ──────────────────────────────────────────────────────────────

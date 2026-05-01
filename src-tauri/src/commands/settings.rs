@@ -26,19 +26,36 @@ pub async fn add_scan_directory_impl(
     db::add_scan_directory(pool, &expanded_path, label).await
 }
 
-/// Remove a custom (non-builtin) scan directory by path.
+/// Remove a custom (non-builtin) scan directory by id.
 /// Returns an error if the directory is built-in or not found.
-pub async fn remove_scan_directory_impl(pool: &DbPool, path: &str) -> Result<(), String> {
-    db::remove_scan_directory(pool, path).await
+pub async fn remove_scan_directory_impl(pool: &DbPool, id: i64) -> Result<(), String> {
+    db::remove_scan_directory_by_id(pool, id).await
 }
 
-/// Toggle the `is_active` flag on a scan directory by path.
+/// Toggle the `is_active` flag on a scan directory by id.
 pub async fn set_scan_directory_active_impl(
     pool: &DbPool,
-    path: &str,
+    id: i64,
     is_active: bool,
 ) -> Result<(), String> {
-    db::toggle_scan_directory(pool, path, is_active).await
+    db::toggle_scan_directory_by_id(pool, id, is_active).await
+}
+
+/// Update the `path` of a scan directory (built-in or custom) by id.
+/// Expands tilde paths and validates non-empty. Returns the persisted (expanded)
+/// path on success.
+pub async fn update_scan_directory_path_impl(
+    pool: &DbPool,
+    id: i64,
+    new_path: &str,
+) -> Result<String, String> {
+    let trimmed = new_path.trim();
+    if trimmed.is_empty() {
+        return Err("Scan directory path cannot be empty".to_string());
+    }
+    let expanded = path_to_string(&expand_home_path(trimmed));
+    db::update_scan_directory_path_by_id(pool, id, &expanded).await?;
+    Ok(expanded)
 }
 
 /// Get a settings value by key. Returns `None` if the key is not set.
@@ -86,20 +103,31 @@ pub async fn add_scan_directory(
     add_scan_directory_impl(&state.db, &path, label.as_deref()).await
 }
 
-/// Tauri command: remove a custom scan directory by path.
+/// Tauri command: remove a custom scan directory by id.
 #[tauri::command]
-pub async fn remove_scan_directory(state: State<'_, AppState>, path: String) -> Result<(), String> {
-    remove_scan_directory_impl(&state.db, &path).await
+pub async fn remove_scan_directory(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    remove_scan_directory_impl(&state.db, id).await
 }
 
-/// Tauri command: set the is_active flag on a scan directory.
+/// Tauri command: set the is_active flag on a scan directory by id.
 #[tauri::command]
 pub async fn set_scan_directory_active(
     state: State<'_, AppState>,
-    path: String,
+    id: i64,
     is_active: bool,
 ) -> Result<(), String> {
-    set_scan_directory_active_impl(&state.db, &path, is_active).await
+    set_scan_directory_active_impl(&state.db, id, is_active).await
+}
+
+/// Tauri command: update the `path` of a scan directory (built-in or custom)
+/// by id. Returns the persisted (expanded) path on success.
+#[tauri::command]
+pub async fn update_scan_directory_path(
+    state: State<'_, AppState>,
+    id: i64,
+    new_path: String,
+) -> Result<String, String> {
+    update_scan_directory_path_impl(&state.db, id, &new_path).await
 }
 
 /// Tauri command: get a settings value by key.
@@ -146,14 +174,10 @@ mod tests {
 
     // ── get_scan_directories_impl ─────────────────────────────────────────────
 
-    /// Counts unique global_skills_dir paths across all built-in agents — the
-    /// same number that seed_builtin_scan_directories inserts.
+    /// `seed_builtin_scan_directories` now produces one row per built-in
+    /// agent (1:1 mapping), so the count equals the number of built-in agents.
     fn expected_builtin_count() -> usize {
-        let mut paths = std::collections::HashSet::new();
-        for agent in db::builtin_agents() {
-            paths.insert(agent.global_skills_dir);
-        }
-        paths.len()
+        db::builtin_agents().len()
     }
 
     #[tokio::test]
@@ -263,13 +287,11 @@ mod tests {
     #[tokio::test]
     async fn test_remove_scan_directory_success() {
         let pool = setup_test_db().await;
-        add_scan_directory_impl(&pool, "/tmp/removable", None)
+        let dir = add_scan_directory_impl(&pool, "/tmp/removable", None)
             .await
             .unwrap();
 
-        remove_scan_directory_impl(&pool, "/tmp/removable")
-            .await
-            .unwrap();
+        remove_scan_directory_impl(&pool, dir.id).await.unwrap();
 
         let dirs = get_scan_directories_impl(&pool).await.unwrap();
         // Built-in dirs remain; only the custom /tmp/removable should be gone.
@@ -288,7 +310,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_nonexistent_scan_directory_fails() {
         let pool = setup_test_db().await;
-        let result = remove_scan_directory_impl(&pool, "/nonexistent/path").await;
+        let result = remove_scan_directory_impl(&pool, 999_999).await;
         assert!(
             result.is_err(),
             "Removing a nonexistent directory should fail"
@@ -298,17 +320,205 @@ mod tests {
     #[tokio::test]
     async fn test_remove_builtin_scan_directory_fails() {
         let pool = setup_test_db().await;
-        // Manually insert a builtin directory
-        sqlx::query(
-            "INSERT INTO scan_directories (path, is_active, is_builtin, added_at)
-             VALUES ('/builtin/path', 1, 1, datetime('now'))",
+        let dirs = get_scan_directories_impl(&pool).await.unwrap();
+        let builtin = dirs
+            .iter()
+            .find(|d| d.is_builtin)
+            .expect("expected at least one builtin scan dir");
+
+        let result = remove_scan_directory_impl(&pool, builtin.id).await;
+        assert!(result.is_err(), "Removing a built-in directory should fail");
+    }
+
+    // ── update_scan_directory_path_impl ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_update_scan_directory_path_renames_custom() {
+        let pool = setup_test_db().await;
+        let dir = add_scan_directory_impl(&pool, "/tmp/before", None)
+            .await
+            .unwrap();
+        update_scan_directory_path_impl(&pool, dir.id, "/tmp/after")
+            .await
+            .unwrap();
+        let dirs = get_scan_directories_impl(&pool).await.unwrap();
+        assert!(dirs.iter().any(|d| d.path == "/tmp/after"));
+        assert!(!dirs.iter().any(|d| d.path == "/tmp/before"));
+    }
+
+    #[tokio::test]
+    async fn test_update_scan_directory_path_renames_builtin() {
+        let pool = setup_test_db().await;
+        let dirs = get_scan_directories_impl(&pool).await.unwrap();
+        let builtin = dirs
+            .iter()
+            .find(|d| d.is_builtin)
+            .expect("expected at least one builtin scan dir");
+        update_scan_directory_path_impl(&pool, builtin.id, "/tmp/builtin-renamed")
+            .await
+            .unwrap();
+        let dirs = get_scan_directories_impl(&pool).await.unwrap();
+        let renamed = dirs
+            .iter()
+            .find(|d| d.path == "/tmp/builtin-renamed")
+            .expect("renamed builtin row missing");
+        assert!(
+            renamed.is_builtin,
+            "is_builtin must be preserved across path edits"
+        );
+        assert!(
+            renamed.agent_id.is_some(),
+            "builtin row must keep its agent_id binding after a path edit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_scan_directory_path_propagates_to_owning_agent() {
+        let pool = setup_test_db().await;
+        // Pick a builtin scan dir; its agent_id determines which agent's
+        // global_skills_dir is rewritten.
+        let dirs = get_scan_directories_impl(&pool).await.unwrap();
+        let builtin = dirs
+            .iter()
+            .find(|d| d.is_builtin)
+            .expect("expected at least one builtin scan dir");
+        let owner_id = builtin
+            .agent_id
+            .clone()
+            .expect("builtin scan dir must have an agent_id");
+
+        update_scan_directory_path_impl(&pool, builtin.id, "/tmp/builtin-agent-sync")
+            .await
+            .unwrap();
+
+        let agents_after = db::get_all_agents(&pool).await.unwrap();
+        let owner = agents_after
+            .iter()
+            .find(|a| a.id == owner_id)
+            .expect("owner agent vanished after rename");
+        assert_eq!(
+            owner.global_skills_dir, "/tmp/builtin-agent-sync",
+            "owner agent {} global_skills_dir must be updated",
+            owner_id
+        );
+        // Other agents must not be touched, even if they originally shared the
+        // same default path (e.g. codex / central) — they have their own row.
+        for agent in &agents_after {
+            if agent.id != owner_id {
+                assert_ne!(
+                    agent.global_skills_dir, "/tmp/builtin-agent-sync",
+                    "unrelated agent {} must not be modified",
+                    agent.id
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_scan_directory_path_custom_does_not_touch_agents() {
+        let pool = setup_test_db().await;
+        let dir = add_scan_directory_impl(&pool, "/tmp/custom-original", None)
+            .await
+            .unwrap();
+        let agents_before = db::get_all_agents(&pool).await.unwrap();
+
+        update_scan_directory_path_impl(&pool, dir.id, "/tmp/custom-renamed")
+            .await
+            .unwrap();
+
+        let agents_after = db::get_all_agents(&pool).await.unwrap();
+        assert_eq!(
+            agents_before.len(),
+            agents_after.len(),
+            "custom path edit must not alter agent count"
+        );
+        for (b, a) in agents_before.iter().zip(agents_after.iter()) {
+            assert_eq!(
+                b.global_skills_dir, a.global_skills_dir,
+                "agent {} global_skills_dir must not change for custom dir edits",
+                a.id
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_scan_directory_path_empty_fails() {
+        let pool = setup_test_db().await;
+        let dir = add_scan_directory_impl(&pool, "/tmp/keep-me", None)
+            .await
+            .unwrap();
+        let result = update_scan_directory_path_impl(&pool, dir.id, "   ").await;
+        assert!(result.is_err(), "Empty new path should fail validation");
+    }
+
+    #[tokio::test]
+    async fn test_update_scan_directory_path_duplicate_fails() {
+        let pool = setup_test_db().await;
+        let dir_a = add_scan_directory_impl(&pool, "/tmp/dup-a", None)
+            .await
+            .unwrap();
+        add_scan_directory_impl(&pool, "/tmp/dup-b", None)
+            .await
+            .unwrap();
+        let result = update_scan_directory_path_impl(&pool, dir_a.id, "/tmp/dup-b").await;
+        assert!(
+            result.is_err(),
+            "Renaming to a path used by another row should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_scan_directory_path_nonexistent_fails() {
+        let pool = setup_test_db().await;
+        let result =
+            update_scan_directory_path_impl(&pool, 999_999, "/tmp/whatever").await;
+        assert!(
+            result.is_err(),
+            "Updating a path that does not exist should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_scan_directory_path_expands_tilde() {
+        let pool = setup_test_db().await;
+        let dir = add_scan_directory_impl(&pool, "/tmp/before-expand", None)
+            .await
+            .unwrap();
+        let stored = update_scan_directory_path_impl(
+            &pool,
+            dir.id,
+            "~/.skillsmanage/renamed-dir",
         )
-        .execute(&pool)
         .await
         .unwrap();
+        assert!(
+            !stored.starts_with('~'),
+            "tilde paths must be expanded before persistence"
+        );
+        assert!(stored.contains(".skillsmanage"));
+    }
 
-        let result = remove_scan_directory_impl(&pool, "/builtin/path").await;
-        assert!(result.is_err(), "Removing a built-in directory should fail");
+    #[tokio::test]
+    async fn test_seed_yields_one_row_per_builtin_agent() {
+        let pool = setup_test_db().await;
+        let agent_ids: std::collections::HashSet<String> =
+            db::builtin_agents().into_iter().map(|a| a.id).collect();
+        let dirs = get_scan_directories_impl(&pool).await.unwrap();
+        let builtin_dirs: Vec<_> = dirs.iter().filter(|d| d.is_builtin).collect();
+        // Exactly one row per built-in agent — the 1:1 mapping invariant.
+        assert_eq!(
+            builtin_dirs.len(),
+            agent_ids.len(),
+            "expected one scan_directory row per built-in agent"
+        );
+        let dir_agent_ids: std::collections::HashSet<String> = builtin_dirs
+            .iter()
+            .filter_map(|d| d.agent_id.clone())
+            .collect();
+        assert_eq!(
+            dir_agent_ids, agent_ids,
+            "every built-in agent must have its own scan_directory row"
+        );
     }
 
     // ── set_scan_directory_active_impl ────────────────────────────────────────
@@ -316,34 +526,51 @@ mod tests {
     #[tokio::test]
     async fn test_set_scan_directory_active_disables() {
         let pool = setup_test_db().await;
-        add_scan_directory_impl(&pool, "/tmp/toggle-me", None)
+        let dir = add_scan_directory_impl(&pool, "/tmp/toggle-me", None)
             .await
             .unwrap();
-        set_scan_directory_active_impl(&pool, "/tmp/toggle-me", false)
+        set_scan_directory_active_impl(&pool, dir.id, false)
             .await
             .unwrap();
         let dirs = get_scan_directories_impl(&pool).await.unwrap();
-        let dir = dirs.iter().find(|d| d.path == "/tmp/toggle-me").unwrap();
-        assert!(!dir.is_active, "Directory should be inactive");
+        let updated = dirs.iter().find(|d| d.id == dir.id).unwrap();
+        assert!(!updated.is_active, "Directory should be inactive");
     }
 
     #[tokio::test]
     async fn test_set_scan_directory_active_enables() {
         let pool = setup_test_db().await;
-        add_scan_directory_impl(&pool, "/tmp/re-enable-me", None)
+        let dir = add_scan_directory_impl(&pool, "/tmp/re-enable-me", None)
             .await
             .unwrap();
-        // First disable
-        set_scan_directory_active_impl(&pool, "/tmp/re-enable-me", false)
+        set_scan_directory_active_impl(&pool, dir.id, false)
             .await
             .unwrap();
-        // Then re-enable
-        set_scan_directory_active_impl(&pool, "/tmp/re-enable-me", true)
+        set_scan_directory_active_impl(&pool, dir.id, true)
             .await
             .unwrap();
         let dirs = get_scan_directories_impl(&pool).await.unwrap();
-        let dir = dirs.iter().find(|d| d.path == "/tmp/re-enable-me").unwrap();
-        assert!(dir.is_active, "Directory should be active again");
+        let updated = dirs.iter().find(|d| d.id == dir.id).unwrap();
+        assert!(updated.is_active, "Directory should be active again");
+    }
+
+    #[tokio::test]
+    async fn test_set_scan_directory_active_works_for_builtin() {
+        let pool = setup_test_db().await;
+        let dirs = get_scan_directories_impl(&pool).await.unwrap();
+        let builtin = dirs
+            .iter()
+            .find(|d| d.is_builtin)
+            .expect("expected at least one builtin scan dir");
+        set_scan_directory_active_impl(&pool, builtin.id, false)
+            .await
+            .unwrap();
+        let dirs = get_scan_directories_impl(&pool).await.unwrap();
+        let updated = dirs.iter().find(|d| d.id == builtin.id).unwrap();
+        assert!(
+            !updated.is_active,
+            "Built-in directory must be toggleable like custom dirs"
+        );
     }
 
     // ── get_setting_impl ──────────────────────────────────────────────────────

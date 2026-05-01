@@ -168,7 +168,7 @@ describe("settingsStore", () => {
 
     vi.mocked(invoke).mockResolvedValueOnce(undefined);
 
-    await useSettingsStore.getState().removeScanDirectory("~/projects/my-project");
+    await useSettingsStore.getState().removeScanDirectory(mockCustomDir.id);
 
     const state = useSettingsStore.getState();
     expect(state.scanDirectories).toHaveLength(1);
@@ -179,10 +179,10 @@ describe("settingsStore", () => {
     useSettingsStore.setState({ scanDirectories: [mockCustomDir] });
     vi.mocked(invoke).mockResolvedValueOnce(undefined);
 
-    await useSettingsStore.getState().removeScanDirectory("~/projects/my-project");
+    await useSettingsStore.getState().removeScanDirectory(mockCustomDir.id);
 
     expect(invoke).toHaveBeenCalledWith("remove_scan_directory", {
-      path: "~/projects/my-project",
+      id: mockCustomDir.id,
     });
   });
 
@@ -190,7 +190,7 @@ describe("settingsStore", () => {
     vi.mocked(invoke).mockRejectedValueOnce(new Error("Cannot remove builtin"));
 
     await expect(
-      useSettingsStore.getState().removeScanDirectory("~/.agents/skills/")
+      useSettingsStore.getState().removeScanDirectory(mockBuiltinDir.id)
     ).rejects.toThrow("Cannot remove builtin");
   });
 
@@ -204,7 +204,7 @@ describe("settingsStore", () => {
     });
 
     vi.mocked(invoke).mockResolvedValueOnce(undefined);
-    await useSettingsStore.getState().toggleScanDirectory("~/projects/my-project", false);
+    await useSettingsStore.getState().toggleScanDirectory(mockCustomDir.id, false);
 
     const state = useSettingsStore.getState();
     expect(state.scanDirectories[0].is_active).toBe(false);
@@ -216,10 +216,10 @@ describe("settingsStore", () => {
     });
 
     vi.mocked(invoke).mockResolvedValueOnce(undefined);
-    await useSettingsStore.getState().toggleScanDirectory("~/projects/my-project", false);
+    await useSettingsStore.getState().toggleScanDirectory(mockCustomDir.id, false);
 
     expect(invoke).toHaveBeenCalledWith("set_scan_directory_active", {
-      path: "~/projects/my-project",
+      id: mockCustomDir.id,
       isActive: false,
     });
   });
@@ -232,7 +232,7 @@ describe("settingsStore", () => {
     });
 
     vi.mocked(invoke).mockResolvedValueOnce(undefined);
-    await useSettingsStore.getState().toggleScanDirectory("~/projects/my-project", true);
+    await useSettingsStore.getState().toggleScanDirectory(mockCustomDir.id, true);
 
     expect(useSettingsStore.getState().scanDirectories[0].is_active).toBe(true);
   });
@@ -246,7 +246,7 @@ describe("settingsStore", () => {
     });
 
     vi.mocked(invoke).mockResolvedValueOnce(undefined);
-    await useSettingsStore.getState().toggleScanDirectory("~/projects/my-project", false);
+    await useSettingsStore.getState().toggleScanDirectory(mockCustomDir.id, false);
 
     const state = useSettingsStore.getState();
     // builtin dir should be unchanged
@@ -262,7 +262,7 @@ describe("settingsStore", () => {
 
     vi.mocked(invoke).mockRejectedValueOnce(new Error("DB error"));
     await expect(
-      useSettingsStore.getState().toggleScanDirectory("~/projects/my-project", false)
+      useSettingsStore.getState().toggleScanDirectory(mockCustomDir.id, false)
     ).rejects.toThrow("DB error");
   });
 
