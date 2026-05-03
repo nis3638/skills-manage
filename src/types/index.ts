@@ -10,6 +10,25 @@ export interface AgentWithStatus {
   is_detected: boolean;
   is_builtin: boolean;
   is_enabled: boolean;
+  /** Path to the agent's program/binary on this machine. */
+  install_path?: string | null;
+  /** Path to the agent's primary configuration file or directory. */
+  config_path?: string | null;
+  /** True when the user has manually overridden install_path / config_path. */
+  is_overridden?: boolean;
+}
+
+/**
+ * Patch payload for `update_builtin_agent_paths`.
+ *
+ * The `*_provided` flags distinguish between "do not modify" and
+ * "set to null" for each path field.
+ */
+export interface BuiltinAgentPathsPatch {
+  install_path_provided?: boolean;
+  install_path?: string | null;
+  config_path_provided?: boolean;
+  config_path?: string | null;
 }
 
 export interface CustomAgentConfig {

@@ -1,6 +1,12 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import { ScanDirectory, AgentWithStatus, CustomAgentConfig, UpdateCustomAgentConfig } from "@/types";
+import {
+  ScanDirectory,
+  AgentWithStatus,
+  CustomAgentConfig,
+  UpdateCustomAgentConfig,
+  BuiltinAgentPathsPatch,
+} from "@/types";
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -28,6 +34,14 @@ interface SettingsState {
   addCustomAgent: (config: CustomAgentConfig) => Promise<AgentWithStatus>;
   updateCustomAgent: (agentId: string, config: UpdateCustomAgentConfig) => Promise<AgentWithStatus>;
   removeCustomAgent: (agentId: string) => Promise<void>;
+
+  // Actions — builtin agents (info maintenance: install_path / config_path)
+  updateBuiltinAgentPaths: (
+    agentId: string,
+    patch: BuiltinAgentPathsPatch,
+  ) => Promise<AgentWithStatus>;
+  resetBuiltinAgentPaths: (agentId: string) => Promise<AgentWithStatus>;
+  setAgentEnabled: (agentId: string, enabled: boolean) => Promise<AgentWithStatus>;
 
   clearError: () => void;
 }
@@ -193,6 +207,40 @@ export const useSettingsStore = create<SettingsState>((set) => ({
    */
   removeCustomAgent: async (agentId: string) => {
     await invoke<void>("remove_custom_agent", { agentId });
+  },
+
+  // ── Builtin Agents (info maintenance) ──────────────────────────────────────
+
+  /**
+   * Update a builtin agent's program path (`install_path`) and/or
+   * configuration path (`config_path`). Marks the agent as overridden so
+   * future re-seeds preserve the user's values.
+   */
+  updateBuiltinAgentPaths: async (agentId, patch) => {
+    return await invoke<AgentWithStatus>("update_builtin_agent_paths", {
+      agentId,
+      patch,
+    });
+  },
+
+  /**
+   * Reset a builtin agent's path fields back to the code-defined defaults
+   * and clear `is_overridden`.
+   */
+  resetBuiltinAgentPaths: async (agentId) => {
+    return await invoke<AgentWithStatus>("reset_builtin_agent_paths", {
+      agentId,
+    });
+  },
+
+  /**
+   * Enable or disable an agent (works for both builtin and custom).
+   */
+  setAgentEnabled: async (agentId, enabled) => {
+    return await invoke<AgentWithStatus>("set_agent_enabled", {
+      agentId,
+      enabled,
+    });
   },
 
   // ── Misc ───────────────────────────────────────────────────────────────────

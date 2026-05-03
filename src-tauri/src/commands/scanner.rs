@@ -1009,6 +1009,9 @@ mod tests {
             is_detected: false,
             is_builtin: false,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         };
         db::insert_custom_agent(&pool, &dummy_agent)
             .await
@@ -1040,6 +1043,9 @@ mod tests {
             is_detected: false,
             is_builtin: false,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         };
         db::insert_custom_agent(&pool, &test_agent).await.unwrap();
 
@@ -1084,6 +1090,9 @@ mod tests {
             is_detected: false,
             is_builtin: false,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         };
         db::insert_custom_agent(&pool, &central_agent)
             .await
@@ -1150,6 +1159,9 @@ mod tests {
             is_detected: false,
             is_builtin: false,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         };
         let agent_b = db::Agent {
             id: "agent-b".to_string(),
@@ -1161,6 +1173,9 @@ mod tests {
             is_detected: false,
             is_builtin: false,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         };
         db::insert_custom_agent(&pool, &agent_a).await.unwrap();
         db::insert_custom_agent(&pool, &agent_b).await.unwrap();
@@ -1484,6 +1499,9 @@ mod tests {
             is_detected: false,
             is_builtin: false,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         };
         db::insert_custom_agent(&pool, &agent).await.unwrap();
 
@@ -1707,6 +1725,9 @@ mod tests {
             is_detected: false,
             is_builtin: false,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         };
         db::insert_custom_agent(&pool, &test_agent).await.unwrap();
 
@@ -1760,6 +1781,9 @@ mod tests {
             is_detected: false,
             is_builtin: false,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         };
         db::insert_custom_agent(&pool, &test_agent).await.unwrap();
 
@@ -1849,6 +1873,9 @@ mod tests {
             is_detected: false,
             is_builtin: false,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         };
         // Insert a coding-category agent pointing to the SAME temp directory,
         // sorted AFTER the central agent so it is processed last (worst case).
@@ -1862,6 +1889,9 @@ mod tests {
             is_detected: false,
             is_builtin: false,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         };
         db::insert_custom_agent(&pool, &central_agent)
             .await

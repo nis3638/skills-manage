@@ -21,12 +21,19 @@ pub struct AgentWithStatus {
     pub project_skills_dir: Option<String>,
     pub icon_name: Option<String>,
     /// `true` if the agent is considered "installed" on this machine.
-    /// Detected by checking whether `global_skills_dir` exists **or** its
-    /// parent directory exists (parent existing implies the app is installed
-    /// even if no skills have been added yet).
+    /// When `install_path` is set we trust it as the strong signal; otherwise
+    /// fall back to the legacy `global_skills_dir`-parent-exists heuristic.
     pub is_detected: bool,
     pub is_builtin: bool,
     pub is_enabled: bool,
+    /// Path to the agent's program/binary on this machine
+    /// (e.g. `/Applications/Cursor.app`, `/usr/local/bin/codex`).
+    pub install_path: Option<String>,
+    /// Path to the agent's primary configuration file or directory
+    /// (e.g. `~/.claude/CLAUDE.md`, `~/.codex/config.toml`).
+    pub config_path: Option<String>,
+    /// Whether the user has manually overridden the path fields.
+    pub is_overridden: bool,
 }
 
 /// Payload for registering a new user-defined agent.
@@ -58,11 +65,20 @@ pub struct UpdateCustomAgentConfig {
 
 /// Returns `true` if the agent appears to be installed on the current machine.
 ///
-/// An agent is considered detected if:
-/// - Its `global_skills_dir` exists, **or**
-/// - The *parent* of `global_skills_dir` exists (the app is installed even
-///   though no skills directory has been created yet).
-pub fn is_agent_detected(global_skills_dir: &str) -> bool {
+/// Detection priority:
+/// 1. If `install_path` is provided and points to an existing path → detected.
+/// 2. Otherwise, if `global_skills_dir` itself exists → detected.
+/// 3. Otherwise, if the *parent* of `global_skills_dir` exists (the app is
+///    installed even though no skills directory has been created yet) →
+///    detected.
+/// 4. Otherwise → not detected.
+pub fn is_agent_detected(global_skills_dir: &str, install_path: Option<&str>) -> bool {
+    if let Some(p) = install_path {
+        let trimmed = p.trim();
+        if !trimmed.is_empty() && Path::new(trimmed).exists() {
+            return true;
+        }
+    }
     let dir = Path::new(global_skills_dir);
     if dir.exists() {
         return true;
@@ -72,7 +88,7 @@ pub fn is_agent_detected(global_skills_dir: &str) -> bool {
 
 /// Convert a `db::Agent` into `AgentWithStatus` using a live filesystem check.
 fn agent_to_with_status(agent: Agent) -> AgentWithStatus {
-    let is_detected = is_agent_detected(&agent.global_skills_dir);
+    let is_detected = is_agent_detected(&agent.global_skills_dir, agent.install_path.as_deref());
     AgentWithStatus {
         id: agent.id,
         display_name: agent.display_name,
@@ -83,6 +99,9 @@ fn agent_to_with_status(agent: Agent) -> AgentWithStatus {
         is_detected,
         is_builtin: agent.is_builtin,
         is_enabled: agent.is_enabled,
+        install_path: agent.install_path,
+        config_path: agent.config_path,
+        is_overridden: agent.is_overridden,
     }
 }
 
@@ -101,21 +120,16 @@ pub async fn detect_agents_impl(pool: &DbPool) -> Result<Vec<AgentWithStatus>, S
     let mut result = Vec::with_capacity(agents.len());
 
     for agent in agents {
-        let is_detected = is_agent_detected(&agent.global_skills_dir);
+        let is_detected =
+            is_agent_detected(&agent.global_skills_dir, agent.install_path.as_deref());
         // Best-effort update; ignore errors (e.g., read-only DB in tests).
         let _ = db::update_agent_detected(pool, &agent.id, is_detected).await;
 
-        result.push(AgentWithStatus {
-            id: agent.id,
-            display_name: agent.display_name,
-            category: agent.category,
-            global_skills_dir: agent.global_skills_dir,
-            project_skills_dir: agent.project_skills_dir,
-            icon_name: agent.icon_name,
-            is_detected,
-            is_builtin: agent.is_builtin,
-            is_enabled: agent.is_enabled,
-        });
+        let mut with_status = agent_to_with_status(agent);
+        // `agent_to_with_status` already recomputed is_detected the same way
+        // we did above; keep the value we just persisted to ensure they match.
+        with_status.is_detected = is_detected;
+        result.push(with_status);
     }
 
     Ok(result)
@@ -164,6 +178,9 @@ pub async fn add_custom_agent_impl(
         is_detected: false, // will be computed live below
         is_builtin: false,
         is_enabled: true,
+        install_path: None,
+        config_path: None,
+        is_overridden: false,
     };
 
     db::insert_custom_agent(pool, &agent).await?;
@@ -209,6 +226,100 @@ pub async fn remove_custom_agent_impl(pool: &DbPool, agent_id: &str) -> Result<(
     db::delete_custom_agent(pool, agent_id).await
 }
 
+/// Frontend-facing payload for `update_builtin_agent_paths`.
+///
+/// `*_provided` flags distinguish "do not modify this column" from
+/// "set this column to NULL" without resorting to nested JSON
+/// `Option<Option<T>>` shapes that don't survive the IPC boundary cleanly.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BuiltinAgentPathsPatch {
+    /// Set to `true` to apply `install_path`. When `true` and `install_path`
+    /// is `None`, the column is cleared.
+    #[serde(default)]
+    pub install_path_provided: bool,
+    pub install_path: Option<String>,
+
+    /// Set to `true` to apply `config_path`. When `true` and `config_path`
+    /// is `None`, the column is cleared.
+    #[serde(default)]
+    pub config_path_provided: bool,
+    pub config_path: Option<String>,
+}
+
+/// Normalize an optional user-supplied path: trim whitespace, expand `~`,
+/// and reject any non-empty string that isn't an absolute path. Returns
+/// `Ok(None)` when the input is missing or trimmed-empty.
+fn normalize_optional_path(value: Option<String>) -> Result<Option<String>, String> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let expanded = expand_home_path(trimmed);
+    if !expanded.is_absolute() {
+        return Err(format!(
+            "Path '{}' must be absolute (or start with '~/').",
+            trimmed
+        ));
+    }
+    Ok(Some(path_to_string(&expanded)))
+}
+
+/// Update a builtin agent's program path and/or config path.
+pub async fn update_builtin_agent_paths_impl(
+    pool: &DbPool,
+    agent_id: &str,
+    patch: BuiltinAgentPathsPatch,
+) -> Result<AgentWithStatus, String> {
+    let install_arg = if patch.install_path_provided {
+        Some(normalize_optional_path(patch.install_path)?)
+    } else {
+        None
+    };
+    let config_arg = if patch.config_path_provided {
+        Some(normalize_optional_path(patch.config_path)?)
+    } else {
+        None
+    };
+
+    let updated = db::update_builtin_agent_paths(pool, agent_id, install_arg, config_arg).await?;
+
+    // Refresh `is_detected` immediately so the UI sees the new value.
+    let is_detected =
+        is_agent_detected(&updated.global_skills_dir, updated.install_path.as_deref());
+    let _ = db::update_agent_detected(pool, agent_id, is_detected).await;
+
+    let mut with_status = agent_to_with_status(updated);
+    with_status.is_detected = is_detected;
+    Ok(with_status)
+}
+
+/// Reset a builtin agent's path fields back to code defaults.
+pub async fn reset_builtin_agent_paths_impl(
+    pool: &DbPool,
+    agent_id: &str,
+) -> Result<AgentWithStatus, String> {
+    let updated = db::reset_builtin_agent_paths(pool, agent_id).await?;
+    let is_detected =
+        is_agent_detected(&updated.global_skills_dir, updated.install_path.as_deref());
+    let _ = db::update_agent_detected(pool, agent_id, is_detected).await;
+    let mut with_status = agent_to_with_status(updated);
+    with_status.is_detected = is_detected;
+    Ok(with_status)
+}
+
+/// Toggle an agent's `is_enabled` flag.
+pub async fn set_agent_enabled_impl(
+    pool: &DbPool,
+    agent_id: &str,
+    enabled: bool,
+) -> Result<AgentWithStatus, String> {
+    let updated = db::set_agent_enabled(pool, agent_id, enabled).await?;
+    Ok(agent_to_with_status(updated))
+}
+
 // ─── Tauri Commands ───────────────────────────────────────────────────────────
 
 /// Tauri command: return all registered agents with live detection status.
@@ -251,6 +362,35 @@ pub async fn remove_custom_agent(
     remove_custom_agent_impl(&state.db, &agent_id).await
 }
 
+/// Tauri command: update a builtin agent's program / config paths.
+#[tauri::command]
+pub async fn update_builtin_agent_paths(
+    state: State<'_, AppState>,
+    agent_id: String,
+    patch: BuiltinAgentPathsPatch,
+) -> Result<AgentWithStatus, String> {
+    update_builtin_agent_paths_impl(&state.db, &agent_id, patch).await
+}
+
+/// Tauri command: reset a builtin agent's path fields to code defaults.
+#[tauri::command]
+pub async fn reset_builtin_agent_paths(
+    state: State<'_, AppState>,
+    agent_id: String,
+) -> Result<AgentWithStatus, String> {
+    reset_builtin_agent_paths_impl(&state.db, &agent_id).await
+}
+
+/// Tauri command: enable or disable an agent (works for builtin and custom).
+#[tauri::command]
+pub async fn set_agent_enabled(
+    state: State<'_, AppState>,
+    agent_id: String,
+    enabled: bool,
+) -> Result<AgentWithStatus, String> {
+    set_agent_enabled_impl(&state.db, &agent_id, enabled).await
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -273,7 +413,7 @@ mod tests {
     fn test_is_detected_existing_dir() {
         let tmp = TempDir::new().unwrap();
         assert!(
-            is_agent_detected(tmp.path().to_str().unwrap()),
+            is_agent_detected(tmp.path().to_str().unwrap(), None),
             "existing directory should be detected"
         );
     }
@@ -284,7 +424,7 @@ mod tests {
         let nonexistent_skills = tmp.path().join("skills");
         // The parent (`tmp`) exists even though `skills/` does not.
         assert!(
-            is_agent_detected(nonexistent_skills.to_str().unwrap()),
+            is_agent_detected(nonexistent_skills.to_str().unwrap(), None),
             "should be detected when parent dir exists"
         );
     }
@@ -292,8 +432,46 @@ mod tests {
     #[test]
     fn test_is_detected_nonexistent_path() {
         assert!(
-            !is_agent_detected("/nonexistent/path/that/does/not/exist/skills"),
+            !is_agent_detected("/nonexistent/path/that/does/not/exist/skills", None),
             "should not be detected when parent does not exist"
+        );
+    }
+
+    #[test]
+    fn test_is_detected_uses_install_path_when_present() {
+        let tmp = TempDir::new().unwrap();
+        let real_app = tmp.path().join("Cursor.app");
+        fs::create_dir(&real_app).unwrap();
+
+        // skills_dir is bogus (parent doesn't exist), but install_path exists.
+        assert!(
+            is_agent_detected(
+                "/no/such/parent/skills",
+                Some(real_app.to_str().unwrap())
+            ),
+            "install_path existing should make agent detected even if skills_dir parent missing"
+        );
+    }
+
+    #[test]
+    fn test_is_detected_falls_back_when_install_path_missing() {
+        let tmp = TempDir::new().unwrap();
+        // install_path doesn't exist; skills_dir does → should still detect.
+        assert!(
+            is_agent_detected(
+                tmp.path().to_str().unwrap(),
+                Some("/totally/missing/binary")
+            ),
+            "should fall back to skills_dir check when install_path missing"
+        );
+    }
+
+    #[test]
+    fn test_is_detected_empty_install_path_treated_as_unset() {
+        // Empty / whitespace install_path should be treated like None.
+        assert!(
+            !is_agent_detected("/no/such/parent/skills", Some("   ")),
+            "empty install_path must not falsely flag detection"
         );
     }
 
@@ -330,12 +508,16 @@ mod tests {
     async fn test_get_agents_not_detected_when_dir_missing() {
         let pool = setup_test_db().await;
 
-        // Point claude-code at a path whose parent also doesn't exist.
-        sqlx::query("UPDATE agents SET global_skills_dir = ? WHERE id = 'claude-code'")
-            .bind("/nonexistent/deep/path/skills")
-            .execute(&pool)
-            .await
-            .unwrap();
+        // Point claude-code at a path whose parent also doesn't exist, and
+        // clear install_path so the strong-signal branch can't kick in.
+        sqlx::query(
+            "UPDATE agents SET global_skills_dir = ?, install_path = NULL
+             WHERE id = 'claude-code'",
+        )
+        .bind("/nonexistent/deep/path/skills")
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let agents = get_agents_impl(&pool).await.unwrap();
         let claude = agents.iter().find(|a| a.id == "claude-code").unwrap();
@@ -655,5 +837,155 @@ mod tests {
         let pool = setup_test_db().await;
         let result = remove_custom_agent_impl(&pool, "cursor").await;
         assert!(result.is_err(), "Removing a built-in agent should fail");
+    }
+
+    // ── update/reset_builtin_agent_paths_impl ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_update_builtin_paths_impl_writes_and_returns_status() {
+        let pool = setup_test_db().await;
+        let patch = BuiltinAgentPathsPatch {
+            install_path_provided: true,
+            install_path: Some("/Applications/Claude.app".to_string()),
+            config_path_provided: true,
+            config_path: Some("/Users/me/.claude/CLAUDE.md".to_string()),
+        };
+
+        let result = update_builtin_agent_paths_impl(&pool, "claude-code", patch)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.install_path.as_deref(),
+            Some("/Applications/Claude.app")
+        );
+        assert_eq!(
+            result.config_path.as_deref(),
+            Some("/Users/me/.claude/CLAUDE.md")
+        );
+        assert!(result.is_overridden);
+        assert_eq!(result.display_name, "Claude Code");
+    }
+
+    #[tokio::test]
+    async fn test_update_builtin_paths_impl_expands_tilde() {
+        let pool = setup_test_db().await;
+        let patch = BuiltinAgentPathsPatch {
+            install_path_provided: true,
+            install_path: Some("~/bin/codex".to_string()),
+            ..Default::default()
+        };
+        let result = update_builtin_agent_paths_impl(&pool, "codex", patch)
+            .await
+            .unwrap();
+        let stored = result.install_path.expect("install_path persisted");
+        assert!(
+            !stored.starts_with('~'),
+            "tilde must be expanded; got {}",
+            stored
+        );
+        assert!(stored.ends_with("/bin/codex"));
+    }
+
+    #[tokio::test]
+    async fn test_update_builtin_paths_impl_rejects_relative_path() {
+        let pool = setup_test_db().await;
+        let patch = BuiltinAgentPathsPatch {
+            install_path_provided: true,
+            install_path: Some("relative/path".to_string()),
+            ..Default::default()
+        };
+        let result = update_builtin_agent_paths_impl(&pool, "codex", patch).await;
+        assert!(result.is_err(), "non-absolute path must be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_update_builtin_paths_impl_clears_when_empty_string() {
+        let pool = setup_test_db().await;
+        // First set a value, then clear it via empty string.
+        let _ = update_builtin_agent_paths_impl(
+            &pool,
+            "codex",
+            BuiltinAgentPathsPatch {
+                install_path_provided: true,
+                install_path: Some("/usr/local/bin/codex".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let cleared = update_builtin_agent_paths_impl(
+            &pool,
+            "codex",
+            BuiltinAgentPathsPatch {
+                install_path_provided: true,
+                install_path: Some("".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(cleared.install_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_update_builtin_paths_impl_rejects_custom_agent() {
+        let pool = setup_test_db().await;
+        let custom_cfg = CustomAgentConfig {
+            id: Some("my-custom".to_string()),
+            display_name: "Mine".to_string(),
+            category: None,
+            global_skills_dir: "/tmp/mine/skills".to_string(),
+        };
+        add_custom_agent_impl(&pool, custom_cfg).await.unwrap();
+
+        let patch = BuiltinAgentPathsPatch {
+            install_path_provided: true,
+            install_path: Some("/x".to_string()),
+            ..Default::default()
+        };
+        let result = update_builtin_agent_paths_impl(&pool, "my-custom", patch).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_reset_builtin_paths_impl_clears_overridden() {
+        let pool = setup_test_db().await;
+        // Override first.
+        let _ = update_builtin_agent_paths_impl(
+            &pool,
+            "claude-code",
+            BuiltinAgentPathsPatch {
+                install_path_provided: true,
+                install_path: Some("/tmp/x".to_string()),
+                config_path_provided: true,
+                config_path: Some("/tmp/y.md".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let reset = reset_builtin_agent_paths_impl(&pool, "claude-code")
+            .await
+            .unwrap();
+        assert!(!reset.is_overridden);
+    }
+
+    // ── set_agent_enabled_impl ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_set_agent_enabled_impl_for_builtin() {
+        let pool = setup_test_db().await;
+        let off = set_agent_enabled_impl(&pool, "cursor", false).await.unwrap();
+        assert!(!off.is_enabled);
+        let on = set_agent_enabled_impl(&pool, "cursor", true).await.unwrap();
+        assert!(on.is_enabled);
+    }
+
+    #[tokio::test]
+    async fn test_set_agent_enabled_impl_unknown_agent_fails() {
+        let pool = setup_test_db().await;
+        let result = set_agent_enabled_impl(&pool, "no-such", false).await;
+        assert!(result.is_err());
     }
 }

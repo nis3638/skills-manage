@@ -70,6 +70,146 @@ pub fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// Return the first candidate path (after `~` expansion) that exists on disk.
+/// Useful for picking a sensible default among multiple known install locations
+/// for a particular agent.
+pub fn first_existing(candidates: &[&str]) -> Option<String> {
+    let home = resolve_home_dir();
+    for cand in candidates {
+        let trimmed = cand.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let expanded = expand_home_path_with_home(trimmed, &home);
+        if expanded.exists() {
+            return Some(path_to_string(&expanded));
+        }
+    }
+    None
+}
+
+/// Look up an executable in `PATH` and return its absolute path if found.
+pub fn which_in_path(name: &str) -> Option<String> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(path_to_string(&candidate));
+        }
+        // On Windows also try the .exe suffix.
+        #[cfg(target_os = "windows")]
+        {
+            let win = dir.join(format!("{}.exe", name));
+            if win.is_file() {
+                return Some(path_to_string(&win));
+            }
+        }
+    }
+    None
+}
+
+/// Best-effort default install path for a given builtin agent ID.
+///
+/// Returns the first existing candidate among well-known locations for that
+/// agent, or `None` if none of the candidates exist on disk. Used by
+/// `builtin_agents()` to seed sensible defaults that the user can later
+/// override via Settings.
+pub fn default_install_path(agent_id: &str) -> Option<String> {
+    // macOS-specific .app bundles for agents that ship as Mac apps.
+    #[cfg(target_os = "macos")]
+    {
+        let mac_apps: &[(&str, &[&str])] = &[
+            (
+                "claude-code",
+                &["/Applications/Claude.app", "~/Applications/Claude.app"],
+            ),
+            (
+                "cursor",
+                &["/Applications/Cursor.app", "~/Applications/Cursor.app"],
+            ),
+            (
+                "windsurf",
+                &["/Applications/Windsurf.app", "~/Applications/Windsurf.app"],
+            ),
+            (
+                "trae",
+                &["/Applications/Trae.app", "~/Applications/Trae.app"],
+            ),
+            (
+                "trae-cn",
+                &["/Applications/Trae CN.app", "~/Applications/Trae CN.app"],
+            ),
+            (
+                "kiro",
+                &["/Applications/Kiro.app", "~/Applications/Kiro.app"],
+            ),
+            (
+                "qoder",
+                &["/Applications/Qoder.app", "~/Applications/Qoder.app"],
+            ),
+            (
+                "factory-droid",
+                &["/Applications/Factory.app", "~/Applications/Factory.app"],
+            ),
+            (
+                "junie",
+                &["/Applications/Junie.app", "~/Applications/Junie.app"],
+            ),
+            (
+                "codebuddy",
+                &[
+                    "/Applications/CodeBuddy.app",
+                    "~/Applications/CodeBuddy.app",
+                ],
+            ),
+        ];
+        if let Some((_, paths)) = mac_apps.iter().find(|(id, _)| *id == agent_id) {
+            if let Some(found) = first_existing(paths) {
+                return Some(found);
+            }
+        }
+    }
+
+    // Cross-platform CLI binaries: prefer PATH lookup, then a few common dirs.
+    let cli_name = match agent_id {
+        "claude-code" => Some("claude"),
+        "codex" => Some("codex"),
+        "gemini-cli" => Some("gemini"),
+        "qwen" => Some("qwen"),
+        "amp" => Some("amp"),
+        "aider" => Some("aider"),
+        "opencode" => Some("opencode"),
+        "kilocode" => Some("kilocode"),
+        "ob1" => Some("ob1"),
+        "augment" => Some("augment"),
+        "copilot" => Some("gh"), // GitHub Copilot CLI ships under `gh copilot`
+        _ => None,
+    };
+
+    if let Some(bin) = cli_name {
+        if let Some(found) = which_in_path(bin) {
+            return Some(found);
+        }
+        let fallback_dirs = [
+            "~/.local/bin",
+            "~/.cargo/bin",
+            "~/.npm-global/bin",
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+        ];
+        let mut candidates: Vec<String> = Vec::new();
+        for dir in &fallback_dirs {
+            candidates.push(format!("{}/{}", dir, bin));
+        }
+        let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+        if let Some(found) = first_existing(&refs) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

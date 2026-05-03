@@ -7,7 +7,7 @@ use sqlx::{
 use std::{collections::HashMap, str::FromStr};
 use uuid::Uuid;
 
-use crate::path_utils::{path_to_string, resolve_home_dir};
+use crate::path_utils::{default_install_path, path_to_string, resolve_home_dir};
 
 pub type DbPool = SqlitePool;
 
@@ -65,6 +65,20 @@ pub struct Agent {
     pub is_detected: bool,
     pub is_builtin: bool,
     pub is_enabled: bool,
+    /// Path to the agent's program/binary on this machine
+    /// (e.g. `/Applications/Cursor.app`, `/usr/local/bin/codex`).
+    /// `NULL` when unknown / not yet configured.
+    #[serde(default)]
+    pub install_path: Option<String>,
+    /// Path to the agent's primary configuration file or directory
+    /// (e.g. `~/.claude/CLAUDE.md`, `~/.codex/config.toml`).
+    /// `NULL` when unknown / not yet configured.
+    #[serde(default)]
+    pub config_path: Option<String>,
+    /// Whether the user has manually overridden `install_path` or
+    /// `config_path`. When `true`, reseed will preserve user values.
+    #[serde(default)]
+    pub is_overridden: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -220,12 +234,51 @@ pub async fn init_database(pool: &DbPool) -> Result<(), String> {
             icon_name          TEXT,
             is_detected        BOOLEAN NOT NULL DEFAULT 0,
             is_builtin         BOOLEAN NOT NULL DEFAULT 1,
-            is_enabled         BOOLEAN NOT NULL DEFAULT 1
+            is_enabled         BOOLEAN NOT NULL DEFAULT 1,
+            install_path       TEXT,
+            config_path        TEXT,
+            is_overridden      BOOLEAN NOT NULL DEFAULT 0
         )",
     )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+
+    // Idempotent migrations for installations created before the schema gained
+    // the install_path / config_path / is_overridden columns. ALTER TABLE in
+    // SQLite has no IF NOT EXISTS guard, so we inspect PRAGMA table_info first.
+    {
+        let rows = sqlx::query("PRAGMA table_info(agents)")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        let existing: Vec<String> = rows
+            .iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        let has = |name: &str| existing.iter().any(|n| n == name);
+
+        if !has("install_path") {
+            sqlx::query("ALTER TABLE agents ADD COLUMN install_path TEXT")
+                .execute(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        if !has("config_path") {
+            sqlx::query("ALTER TABLE agents ADD COLUMN config_path TEXT")
+                .execute(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        if !has("is_overridden") {
+            sqlx::query(
+                "ALTER TABLE agents ADD COLUMN is_overridden BOOLEAN NOT NULL DEFAULT 0",
+            )
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+    }
 
     // collections table
     sqlx::query(
@@ -458,8 +511,9 @@ async fn seed_builtin_agents(pool: &DbPool) -> Result<(), String> {
         sqlx::query(
             "INSERT INTO agents
              (id, display_name, category, global_skills_dir, project_skills_dir,
-              icon_name, is_detected, is_builtin, is_enabled)
-             VALUES (?, ?, ?, ?, ?, ?, 0, 1, 1)
+              icon_name, is_detected, is_builtin, is_enabled,
+              install_path, config_path, is_overridden)
+             VALUES (?, ?, ?, ?, ?, ?, 0, 1, 1, ?, ?, 0)
              ON CONFLICT(id) DO UPDATE SET
               display_name = excluded.display_name,
               category = excluded.category,
@@ -468,7 +522,16 @@ async fn seed_builtin_agents(pool: &DbPool) -> Result<(), String> {
               --  every builtin agent the same so edits made via Settings stick).
               global_skills_dir = agents.global_skills_dir,
               project_skills_dir = excluded.project_skills_dir,
-              icon_name = excluded.icon_name",
+              icon_name = excluded.icon_name,
+              -- Respect is_overridden: keep user's install_path / config_path
+              -- when they have customized either; otherwise let new defaults
+              -- (e.g. shipped after an upgrade) propagate.
+              install_path = CASE WHEN agents.is_overridden = 1
+                                  THEN agents.install_path
+                                  ELSE excluded.install_path END,
+              config_path  = CASE WHEN agents.is_overridden = 1
+                                  THEN agents.config_path
+                                  ELSE excluded.config_path  END",
         )
         .bind(&agent.id)
         .bind(&agent.display_name)
@@ -476,6 +539,8 @@ async fn seed_builtin_agents(pool: &DbPool) -> Result<(), String> {
         .bind(&agent.global_skills_dir)
         .bind(&agent.project_skills_dir)
         .bind(&agent.icon_name)
+        .bind(&agent.install_path)
+        .bind(&agent.config_path)
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -768,11 +833,37 @@ async fn ensure_column(
     Ok(())
 }
 
+/// Default config-file path for a known builtin agent (returns `None` for
+/// agents whose primary config location is not well-known).
+///
+/// `in_home` is a closure that joins a relative path under the user's home
+/// directory and returns it as a string.
+fn builtin_default_config_path<F>(id: &str, in_home: &F) -> Option<String>
+where
+    F: Fn(&str) -> String,
+{
+    match id {
+        "claude-code" => Some(in_home(".claude/CLAUDE.md")),
+        "codex" => Some(in_home(".codex/config.toml")),
+        "amp" => Some(in_home(".amp/settings.json")),
+        "cursor" => Some(in_home(".cursor/settings.json")),
+        "gemini-cli" => Some(in_home(".gemini/settings.json")),
+        "qwen" => Some(in_home(".qwen/settings.json")),
+        "aider" => Some(in_home(".aider.conf.yml")),
+        "windsurf" => Some(in_home(".windsurf/settings.json")),
+        "opencode" => Some(in_home(".opencode/config.json")),
+        "kilocode" => Some(in_home(".kilocode/config.json")),
+        "augment" => Some(in_home(".augment/config.json")),
+        "copilot" => Some(in_home(".config/gh/config.yml")),
+        _ => None,
+    }
+}
+
 /// Returns the list of built-in agents using the current user's home directory.
 pub fn builtin_agents() -> Vec<Agent> {
     let home = resolve_home_dir();
     let in_home = |relative: &str| path_to_string(&home.join(relative));
-    vec![
+    let mut agents: Vec<Agent> = vec![
         // ── Coding platforms ─────────────────────────────────────────────────
         Agent {
             id: "claude-code".to_string(),
@@ -784,6 +875,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "codex".to_string(),
@@ -795,6 +889,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "cursor".to_string(),
@@ -806,6 +903,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "gemini-cli".to_string(),
@@ -817,6 +917,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "trae".to_string(),
@@ -828,6 +931,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "factory-droid".to_string(),
@@ -839,6 +945,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "junie".to_string(),
@@ -850,6 +959,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "qwen".to_string(),
@@ -861,6 +973,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "trae-cn".to_string(),
@@ -872,6 +987,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "windsurf".to_string(),
@@ -883,6 +1001,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "qoder".to_string(),
@@ -894,6 +1015,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "augment".to_string(),
@@ -905,6 +1029,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "opencode".to_string(),
@@ -916,6 +1043,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "kilocode".to_string(),
@@ -927,6 +1057,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "ob1".to_string(),
@@ -938,6 +1071,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "amp".to_string(),
@@ -949,6 +1085,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "kiro".to_string(),
@@ -960,6 +1099,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "codebuddy".to_string(),
@@ -971,6 +1113,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "hermes".to_string(),
@@ -982,6 +1127,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "copilot".to_string(),
@@ -993,6 +1141,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "aider".to_string(),
@@ -1004,6 +1155,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         // ── Lobster platforms ────────────────────────────────────────────────
         Agent {
@@ -1016,6 +1170,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "qclaw".to_string(),
@@ -1027,6 +1184,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "easyclaw".to_string(),
@@ -1038,6 +1198,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "autoclaw".to_string(),
@@ -1049,6 +1212,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         Agent {
             id: "workbuddy".to_string(),
@@ -1060,6 +1226,9 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
         // ── Central Skills ────────────────────────────────────────────────────
         Agent {
@@ -1072,8 +1241,26 @@ pub fn builtin_agents() -> Vec<Agent> {
             is_detected: false,
             is_builtin: true,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         },
-    ]
+    ];
+
+    // Populate default install_path / config_path per agent.
+    // `default_install_path` performs a best-effort filesystem probe; users
+    // can override these values from Settings, in which case `is_overridden`
+    // becomes 1 and reseed will preserve the override.
+    for agent in agents.iter_mut() {
+        if agent.install_path.is_none() {
+            agent.install_path = default_install_path(&agent.id);
+        }
+        if agent.config_path.is_none() {
+            agent.config_path = builtin_default_config_path(&agent.id, &in_home);
+        }
+    }
+
+    agents
 }
 
 /// Update the central agent's `global_skills_dir`.
@@ -1584,8 +1771,9 @@ pub async fn insert_custom_agent(pool: &DbPool, agent: &Agent) -> Result<(), Str
     sqlx::query(
         "INSERT INTO agents
          (id, display_name, category, global_skills_dir, project_skills_dir,
-          icon_name, is_detected, is_builtin, is_enabled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1)",
+          icon_name, is_detected, is_builtin, is_enabled,
+          install_path, config_path, is_overridden)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, 0)",
     )
     .bind(&agent.id)
     .bind(&agent.display_name)
@@ -1594,10 +1782,140 @@ pub async fn insert_custom_agent(pool: &DbPool, agent: &Agent) -> Result<(), Str
     .bind(&agent.project_skills_dir)
     .bind(&agent.icon_name)
     .bind(agent.is_detected)
+    .bind(&agent.install_path)
+    .bind(&agent.config_path)
     .execute(pool)
     .await
     .map(|_| ())
     .map_err(|e| e.to_string())
+}
+
+/// Update a builtin agent's `install_path` and/or `config_path`.
+///
+/// Only these two fields are mutable for builtin agents — any other field
+/// (`display_name`, `category`, `global_skills_dir`, `icon_name`, ...) is
+/// considered immutable and must not be exposed via the maintenance UI.
+///
+/// `install_path` / `config_path` are passed as `Option<Option<String>>`:
+/// - `None`: do not modify this column
+/// - `Some(None)`: clear this column (set to NULL)
+/// - `Some(Some(value))`: set this column to `value`
+///
+/// Always sets `is_overridden = 1` so future reseeds will preserve the user's
+/// values.
+///
+/// Returns the updated agent, or an error if `agent_id` doesn't exist or is
+/// not a builtin.
+pub async fn update_builtin_agent_paths(
+    pool: &DbPool,
+    agent_id: &str,
+    install_path: Option<Option<String>>,
+    config_path: Option<Option<String>>,
+) -> Result<Agent, String> {
+    let agent = get_agent_by_id(pool, agent_id).await?;
+    match agent {
+        None => return Err(format!("Agent '{}' not found", agent_id)),
+        Some(a) if !a.is_builtin => {
+            return Err(format!(
+                "Agent '{}' is not a builtin; use update_custom_agent instead",
+                agent_id
+            ))
+        }
+        Some(_) => {}
+    }
+
+    if install_path.is_none() && config_path.is_none() {
+        // Nothing to update; still mark overridden so callers can use this as
+        // an "ack" path. But avoid running an empty UPDATE statement.
+        return get_agent_by_id(pool, agent_id)
+            .await?
+            .ok_or_else(|| "Agent disappeared".to_string());
+    }
+
+    let mut sets: Vec<&str> = Vec::new();
+    if install_path.is_some() {
+        sets.push("install_path = ?");
+    }
+    if config_path.is_some() {
+        sets.push("config_path = ?");
+    }
+    sets.push("is_overridden = 1");
+    let sql = format!("UPDATE agents SET {} WHERE id = ?", sets.join(", "));
+
+    let mut q = sqlx::query(&sql);
+    if let Some(ip) = &install_path {
+        q = q.bind(ip);
+    }
+    if let Some(cp) = &config_path {
+        q = q.bind(cp);
+    }
+    q = q.bind(agent_id);
+    q.execute(pool).await.map_err(|e| e.to_string())?;
+
+    get_agent_by_id(pool, agent_id)
+        .await?
+        .ok_or_else(|| "Failed to retrieve updated agent".to_string())
+}
+
+/// Reset a builtin agent's `install_path` / `config_path` back to their
+/// code-defined defaults (as returned by `builtin_agents()`), and clear
+/// `is_overridden`.
+pub async fn reset_builtin_agent_paths(pool: &DbPool, agent_id: &str) -> Result<Agent, String> {
+    let agent = get_agent_by_id(pool, agent_id).await?;
+    match agent {
+        None => return Err(format!("Agent '{}' not found", agent_id)),
+        Some(a) if !a.is_builtin => {
+            return Err(format!(
+                "Agent '{}' is not a builtin; nothing to reset",
+                agent_id
+            ))
+        }
+        Some(_) => {}
+    }
+
+    let defaults = builtin_agents()
+        .into_iter()
+        .find(|a| a.id == agent_id)
+        .ok_or_else(|| format!("Builtin agent '{}' has no code default", agent_id))?;
+
+    sqlx::query(
+        "UPDATE agents
+         SET install_path = ?, config_path = ?, is_overridden = 0
+         WHERE id = ?",
+    )
+    .bind(&defaults.install_path)
+    .bind(&defaults.config_path)
+    .bind(agent_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    get_agent_by_id(pool, agent_id)
+        .await?
+        .ok_or_else(|| "Failed to retrieve agent after reset".to_string())
+}
+
+/// Toggle an agent's `is_enabled` flag. Works for both builtin and custom
+/// agents (used by the Settings UI to disable an agent without deleting it).
+pub async fn set_agent_enabled(
+    pool: &DbPool,
+    agent_id: &str,
+    enabled: bool,
+) -> Result<Agent, String> {
+    if get_agent_by_id(pool, agent_id).await?.is_none() {
+        return Err(format!("Agent '{}' not found", agent_id));
+    }
+
+    sqlx::query("UPDATE agents SET is_enabled = ? WHERE id = ?")
+        .bind(enabled)
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    get_agent_by_id(pool, agent_id)
+        .await?
+        .ok_or_else(|| "Failed to retrieve agent after enabled-toggle".to_string())
 }
 
 /// Delete a custom (non-builtin) agent by ID. Returns an error if the agent is builtin.
@@ -2403,6 +2721,9 @@ mod tests {
             is_detected: false,
             is_builtin: false,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         };
         insert_custom_agent(&pool, &custom).await.unwrap();
 
@@ -2430,6 +2751,9 @@ mod tests {
             is_detected: false,
             is_builtin: false,
             is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
         };
         insert_custom_agent(&pool, &custom).await.unwrap();
         delete_custom_agent(&pool, "deletable-agent").await.unwrap();
@@ -2446,6 +2770,202 @@ mod tests {
             result.is_err(),
             "Should not be able to delete built-in agent"
         );
+    }
+
+    // ── builtin agent paths (install_path / config_path / is_overridden) ────
+
+    #[tokio::test]
+    async fn test_update_builtin_agent_paths_writes_install_and_config() {
+        let pool = setup_test_db().await;
+        let updated = update_builtin_agent_paths(
+            &pool,
+            "claude-code",
+            Some(Some("/Applications/Claude.app".to_string())),
+            Some(Some("/Users/me/.claude/CLAUDE.md".to_string())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            updated.install_path.as_deref(),
+            Some("/Applications/Claude.app")
+        );
+        assert_eq!(
+            updated.config_path.as_deref(),
+            Some("/Users/me/.claude/CLAUDE.md")
+        );
+        assert!(updated.is_overridden, "user edit must mark is_overridden");
+        // immutable fields stay put
+        assert_eq!(updated.display_name, "Claude Code");
+        assert_eq!(updated.category, "coding");
+    }
+
+    #[tokio::test]
+    async fn test_update_builtin_agent_paths_partial_only_install() {
+        let pool = setup_test_db().await;
+        // remember original config_path default
+        let before = get_agent_by_id(&pool, "codex").await.unwrap().unwrap();
+        let updated = update_builtin_agent_paths(
+            &pool,
+            "codex",
+            Some(Some("/usr/local/bin/codex".to_string())),
+            None, // do not touch config_path
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.install_path.as_deref(), Some("/usr/local/bin/codex"));
+        assert_eq!(updated.config_path, before.config_path);
+        assert!(updated.is_overridden);
+    }
+
+    #[tokio::test]
+    async fn test_update_builtin_agent_paths_can_clear_value() {
+        let pool = setup_test_db().await;
+        let updated = update_builtin_agent_paths(
+            &pool,
+            "claude-code",
+            Some(None), // clear install_path explicitly
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(updated.install_path.is_none());
+        assert!(updated.is_overridden);
+    }
+
+    #[tokio::test]
+    async fn test_update_builtin_agent_paths_rejects_custom_agent() {
+        let pool = setup_test_db().await;
+        let custom = Agent {
+            id: "my-cli".to_string(),
+            display_name: "My CLI".to_string(),
+            category: "other".to_string(),
+            global_skills_dir: "/tmp/my-cli/skills".to_string(),
+            project_skills_dir: None,
+            icon_name: None,
+            is_detected: false,
+            is_builtin: false,
+            is_enabled: true,
+            install_path: None,
+            config_path: None,
+            is_overridden: false,
+        };
+        insert_custom_agent(&pool, &custom).await.unwrap();
+        let res = update_builtin_agent_paths(
+            &pool,
+            "my-cli",
+            Some(Some("/x".into())),
+            None,
+        )
+        .await;
+        assert!(res.is_err(), "must not allow editing custom via builtin API");
+    }
+
+    #[tokio::test]
+    async fn test_update_builtin_agent_paths_rejects_unknown_agent() {
+        let pool = setup_test_db().await;
+        let res = update_builtin_agent_paths(
+            &pool,
+            "no-such-agent",
+            Some(Some("/x".into())),
+            None,
+        )
+        .await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_reset_builtin_agent_paths_restores_defaults() {
+        let pool = setup_test_db().await;
+        // First override install_path to something custom.
+        update_builtin_agent_paths(
+            &pool,
+            "claude-code",
+            Some(Some("/tmp/custom-claude".into())),
+            Some(Some("/tmp/custom.md".into())),
+        )
+        .await
+        .unwrap();
+        // Then reset.
+        let reset = reset_builtin_agent_paths(&pool, "claude-code")
+            .await
+            .unwrap();
+        assert!(!reset.is_overridden, "reset must clear is_overridden");
+
+        // The reset value should match the code default (which may itself be
+        // None on a build host without /Applications/Claude.app).
+        let defaults = builtin_agents()
+            .into_iter()
+            .find(|a| a.id == "claude-code")
+            .unwrap();
+        assert_eq!(reset.install_path, defaults.install_path);
+        assert_eq!(reset.config_path, defaults.config_path);
+    }
+
+    #[tokio::test]
+    async fn test_seed_preserves_overridden_paths_across_reinit() {
+        let pool = setup_test_db().await;
+        update_builtin_agent_paths(
+            &pool,
+            "cursor",
+            Some(Some("/Applications/Cursor.app".into())),
+            Some(Some("/Users/me/.cursor/settings.json".into())),
+        )
+        .await
+        .unwrap();
+        // Re-run init: simulates app restart / upgrade.
+        init_database(&pool).await.unwrap();
+
+        let after = get_agent_by_id(&pool, "cursor").await.unwrap().unwrap();
+        assert_eq!(
+            after.install_path.as_deref(),
+            Some("/Applications/Cursor.app"),
+            "is_overridden=1 must protect install_path from reseed"
+        );
+        assert_eq!(
+            after.config_path.as_deref(),
+            Some("/Users/me/.cursor/settings.json")
+        );
+        assert!(after.is_overridden);
+    }
+
+    #[tokio::test]
+    async fn test_seed_updates_default_paths_when_not_overridden() {
+        let pool = setup_test_db().await;
+        // Mutate the row directly to simulate an old default that should be
+        // refreshed on next launch (no is_overridden flag set).
+        sqlx::query(
+            "UPDATE agents SET install_path = '/old/path', config_path = '/old.md'
+             WHERE id = 'amp' AND is_builtin = 1",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Re-seed.
+        init_database(&pool).await.unwrap();
+
+        let amp = get_agent_by_id(&pool, "amp").await.unwrap().unwrap();
+        let defaults = builtin_agents()
+            .into_iter()
+            .find(|a| a.id == "amp")
+            .unwrap();
+        // Without is_overridden, reseed should bring the row back to defaults.
+        assert_eq!(amp.install_path, defaults.install_path);
+        assert_eq!(amp.config_path, defaults.config_path);
+        assert!(!amp.is_overridden);
+    }
+
+    #[tokio::test]
+    async fn test_set_agent_enabled_for_builtin_and_custom() {
+        let pool = setup_test_db().await;
+        let updated = set_agent_enabled(&pool, "cursor", false).await.unwrap();
+        assert!(!updated.is_enabled);
+        let updated = set_agent_enabled(&pool, "cursor", true).await.unwrap();
+        assert!(updated.is_enabled);
+
+        // Unknown agent → error.
+        let err = set_agent_enabled(&pool, "no-such", false).await;
+        assert!(err.is_err());
     }
 
     #[tokio::test]

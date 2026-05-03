@@ -377,4 +377,85 @@ describe("settingsStore", () => {
     expect(useSettingsStore.getState().githubPat).toBe("");
     expect(useSettingsStore.getState().isSavingGitHubPat).toBe(false);
   });
+
+  // ── Builtin Agent Info Maintenance ────────────────────────────────────────
+
+  const mockBuiltinAgent: AgentWithStatus = {
+    id: "claude-code",
+    display_name: "Claude Code",
+    category: "coding",
+    global_skills_dir: "~/.claude/skills/",
+    is_detected: true,
+    is_builtin: true,
+    is_enabled: true,
+    install_path: "/Applications/Claude.app",
+    config_path: "~/.claude/CLAUDE.md",
+    is_overridden: true,
+  };
+
+  it("updateBuiltinAgentPaths invokes update_builtin_agent_paths with patch", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(mockBuiltinAgent);
+
+    const result = await useSettingsStore
+      .getState()
+      .updateBuiltinAgentPaths("claude-code", {
+        install_path_provided: true,
+        install_path: "/Applications/Claude.app",
+        config_path_provided: true,
+        config_path: "~/.claude/CLAUDE.md",
+      });
+
+    expect(invoke).toHaveBeenCalledWith("update_builtin_agent_paths", {
+      agentId: "claude-code",
+      patch: {
+        install_path_provided: true,
+        install_path: "/Applications/Claude.app",
+        config_path_provided: true,
+        config_path: "~/.claude/CLAUDE.md",
+      },
+    });
+    expect(result).toEqual(mockBuiltinAgent);
+  });
+
+  it("resetBuiltinAgentPaths invokes reset_builtin_agent_paths", async () => {
+    const reset = { ...mockBuiltinAgent, is_overridden: false };
+    vi.mocked(invoke).mockResolvedValueOnce(reset);
+
+    const result = await useSettingsStore
+      .getState()
+      .resetBuiltinAgentPaths("claude-code");
+
+    expect(invoke).toHaveBeenCalledWith("reset_builtin_agent_paths", {
+      agentId: "claude-code",
+    });
+    expect(result.is_overridden).toBe(false);
+  });
+
+  it("setAgentEnabled invokes set_agent_enabled with correct flag", async () => {
+    const disabled = { ...mockBuiltinAgent, is_enabled: false };
+    vi.mocked(invoke).mockResolvedValueOnce(disabled);
+
+    const result = await useSettingsStore
+      .getState()
+      .setAgentEnabled("claude-code", false);
+
+    expect(invoke).toHaveBeenCalledWith("set_agent_enabled", {
+      agentId: "claude-code",
+      enabled: false,
+    });
+    expect(result.is_enabled).toBe(false);
+  });
+
+  it("updateBuiltinAgentPaths propagates errors from invoke", async () => {
+    vi.mocked(invoke).mockRejectedValueOnce("Path must be absolute");
+
+    await expect(
+      useSettingsStore
+        .getState()
+        .updateBuiltinAgentPaths("claude-code", {
+          install_path_provided: true,
+          install_path: "relative/path",
+        }),
+    ).rejects.toBe("Path must be absolute");
+  });
 });

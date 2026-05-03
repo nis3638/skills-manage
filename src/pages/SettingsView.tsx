@@ -20,6 +20,7 @@ import { useThemeStore, CatppuccinFlavor, CatppuccinAccent, ACCENT_NAMES } from 
 import { usePlatformStore } from "@/stores/platformStore";
 import { AddDirectoryDialog } from "@/components/settings/AddDirectoryDialog";
 import { PlatformDialog } from "@/components/settings/PlatformDialog";
+import { BuiltinAgentSection } from "@/components/settings/BuiltinAgentSection";
 import { Input } from "@/components/ui/input";
 import { AgentWithStatus, ScanDirectory } from "@/types";
 import { AI_PROVIDERS, REGION_LABELS, RegionId } from "@/data/aiProviders";
@@ -653,6 +654,9 @@ export function SettingsView() {
             </div>
           </CardContent>
         </Card>
+
+        {/* ── Section 0.5: Built-in Agent Info Maintenance ───────────────── */}
+        <BuiltinAgentSection />
 
         {/* ── Section 1: Custom Platforms ───────────────────────────────────── */}
         <Card>
