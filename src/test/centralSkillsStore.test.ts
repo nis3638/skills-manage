@@ -75,6 +75,7 @@ describe("centralSkillsStore", () => {
       isLoading: false,
       isInstalling: false,
       togglingAgentId: null,
+      syncingSkillId: null,
       error: null,
     });
     vi.clearAllMocks();
@@ -89,6 +90,7 @@ describe("centralSkillsStore", () => {
     expect(state.isLoading).toBe(false);
     expect(state.isInstalling).toBe(false);
     expect(state.togglingAgentId).toBeNull();
+    expect(state.syncingSkillId).toBeNull();
     expect(state.error).toBeNull();
   });
 
@@ -224,6 +226,29 @@ describe("centralSkillsStore", () => {
     const state = useCentralSkillsStore.getState();
     expect(state.error).toContain("symlink failed");
     expect(state.isInstalling).toBe(false);
+  });
+
+  // ── syncSkillFromSource ──────────────────────────────────────────────────
+
+  it("syncs a skill from source then refreshes central skills", async () => {
+    const syncedSkill = {
+      ...mockSkills[0],
+      source_path: "/tmp/source/frontend-design",
+    };
+    const refreshedSkills = [syncedSkill, mockSkills[1]];
+
+    vi.mocked(invoke)
+      .mockResolvedValueOnce(syncedSkill)
+      .mockResolvedValueOnce(refreshedSkills);
+
+    await useCentralSkillsStore.getState().syncSkillFromSource("frontend-design");
+
+    expect(invoke).toHaveBeenCalledWith("sync_central_skill_from_source", {
+      skillId: "frontend-design",
+    });
+    expect(invoke).toHaveBeenCalledWith("get_central_skills");
+    expect(useCentralSkillsStore.getState().skills).toEqual(refreshedSkills);
+    expect(useCentralSkillsStore.getState().syncingSkillId).toBeNull();
   });
 
   // ── togglePlatformLink ────────────────────────────────────────────────────

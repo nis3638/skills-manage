@@ -11,6 +11,7 @@ import {
   X,
   Loader2,
   Lock,
+  RefreshCw,
 } from "lucide-react";
 import type { MouseEventHandler, Ref } from "react";
 import { useTranslation } from "react-i18next";
@@ -99,6 +100,7 @@ export interface UnifiedSkillCardProps {
   onUninstallFromPlatform?: () => void;
   uninstallFromLabel?: string;
   onInstall?: () => void;
+  onSyncFromSource?: () => void;
   onRemove?: () => void;
   isLoading?: boolean;
   detailButtonRef?: Ref<HTMLButtonElement>;
@@ -131,6 +133,7 @@ export function UnifiedSkillCard(props: UnifiedSkillCardProps) {
     onUninstallFromPlatform,
     uninstallFromLabel,
     onInstall,
+    onSyncFromSource,
     onRemove,
     isLoading,
     detailButtonRef,
@@ -146,6 +149,7 @@ export function UnifiedSkillCard(props: UnifiedSkillCardProps) {
     onInstallToPlatform ||
     onUninstallFromPlatform ||
     onInstall ||
+    onSyncFromSource ||
     onRemove
   );
 
@@ -283,6 +287,18 @@ export function UnifiedSkillCard(props: UnifiedSkillCardProps) {
                     className="inline-flex h-8 w-8 items-center justify-center rounded-md text-primary cursor-default"
                   >
                     <Check className="size-4" />
+                  </button>
+                )}
+
+                {onSyncFromSource && (
+                  <button
+                    onClick={onSyncFromSource}
+                    disabled={isLoading}
+                    title={t("central.syncFromSource")}
+                    aria-label={t("central.syncFromSourceLabel", { name })}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-md transition-colors text-muted-foreground hover:bg-primary/10 hover:text-primary disabled:opacity-50 disabled:cursor-default"
+                  >
+                    {isLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
                   </button>
                 )}
 

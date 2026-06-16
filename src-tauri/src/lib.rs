@@ -58,6 +58,7 @@ pub fn run() {
             commands::skills::get_skills_by_agent,
             commands::skills::get_central_skills,
             commands::skills::get_skill_detail,
+            commands::skills::sync_central_skill_from_source,
             commands::skills::read_skill_content,
             commands::skills::read_file_by_path,
             commands::skills::open_in_file_manager,

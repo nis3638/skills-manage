@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tauri::State;
 
@@ -24,6 +24,10 @@ pub struct SkillWithLinks {
     pub scanned_at: String,
     pub created_at: String,
     pub updated_at: String,
+    pub source_type: Option<String>,
+    pub source_ref: Option<String>,
+    pub source_path: Option<String>,
+    pub source_synced_at: Option<String>,
     /// Agent IDs that have an installation record for this skill.
     pub linked_agents: Vec<String>,
 }
@@ -108,6 +112,57 @@ fn skill_dir_path(skill: &db::Skill) -> String {
                 .map(|path| path.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| skill.file_path.clone())
+}
+
+fn replace_dir_from_source(source_dir: &Path, target_dir: &Path) -> Result<(), String> {
+    if !source_dir.join("SKILL.md").is_file() {
+        return Err(format!(
+            "Source directory '{}' does not contain SKILL.md",
+            source_dir.display()
+        ));
+    }
+    if !target_dir.exists() {
+        return Err(format!(
+            "Central skill directory '{}' does not exist",
+            target_dir.display()
+        ));
+    }
+    if std::fs::symlink_metadata(target_dir)
+        .map_err(|e| format!("Failed to inspect central skill directory: {}", e))?
+        .file_type()
+        .is_symlink()
+    {
+        return Err("Refusing to replace a symlinked central skill directory".to_string());
+    }
+
+    let source_canonical = std::fs::canonicalize(source_dir)
+        .map_err(|e| format!("Failed to canonicalize source directory: {}", e))?;
+    let target_canonical = std::fs::canonicalize(target_dir)
+        .map_err(|e| format!("Failed to canonicalize central skill directory: {}", e))?;
+    if source_canonical == target_canonical {
+        return Err("Source and central skill directory are the same path".to_string());
+    }
+
+    let parent = target_dir
+        .parent()
+        .ok_or_else(|| "Central skill directory has no parent".to_string())?;
+    let suffix = uuid::Uuid::new_v4();
+    let tmp_dir = parent.join(format!(".sync-tmp-{}", suffix));
+    let backup_dir = parent.join(format!(".sync-backup-{}", suffix));
+
+    super::linker::copy_dir_all(source_dir, &tmp_dir)?;
+
+    std::fs::rename(target_dir, &backup_dir)
+        .map_err(|e| format!("Failed to stage current central skill: {}", e))?;
+    if let Err(err) = std::fs::rename(&tmp_dir, target_dir) {
+        let _ = std::fs::rename(&backup_dir, target_dir);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(format!("Failed to replace central skill: {}", err));
+    }
+
+    std::fs::remove_dir_all(&backup_dir)
+        .map_err(|e| format!("Failed to remove sync backup: {}", e))?;
+    Ok(())
 }
 
 fn claude_conflict_group(agent_id: &str, skill_id: &str) -> String {
@@ -319,6 +374,7 @@ pub async fn get_central_skills(state: State<'_, AppState>) -> Result<Vec<SkillW
         let installations = db::get_skill_installations(&state.db, &skill.id).await?;
         let linked_agents: Vec<String> = installations.into_iter().map(|i| i.agent_id).collect();
         let (created_at, updated_at) = skill_filesystem_timestamps(&skill);
+        let source = db::get_skill_source(&state.db, &skill.id).await?;
 
         result.push(SkillWithLinks {
             id: skill.id,
@@ -331,11 +387,75 @@ pub async fn get_central_skills(state: State<'_, AppState>) -> Result<Vec<SkillW
             scanned_at: skill.scanned_at,
             created_at,
             updated_at,
+            source_type: source.as_ref().map(|s| s.source_type.clone()),
+            source_ref: source.as_ref().and_then(|s| s.source_ref.clone()),
+            source_path: source.as_ref().map(|s| s.source_path.clone()),
+            source_synced_at: source.as_ref().map(|s| s.synced_at.clone()),
             linked_agents,
         });
     }
 
     Ok(result)
+}
+
+#[tauri::command]
+pub async fn sync_central_skill_from_source(
+    state: State<'_, AppState>,
+    skill_id: String,
+) -> Result<SkillWithLinks, String> {
+    let pool = &state.db;
+    let skill = db::get_skill_by_id(pool, &skill_id)
+        .await?
+        .ok_or_else(|| format!("Skill '{}' not found", skill_id))?;
+    if !skill.is_central {
+        return Err(format!("Skill '{}' is not a central skill", skill_id));
+    }
+
+    let source = db::get_skill_source(pool, &skill_id)
+        .await?
+        .ok_or_else(|| format!("Skill '{}' has no recorded source", skill_id))?;
+    let target_dir = skill
+        .canonical_path
+        .as_ref()
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("Skill '{}' has no canonical path", skill_id))?;
+    let source_dir = PathBuf::from(&source.source_path);
+    let source_skill_md_path = source_dir.join("SKILL.md");
+    let info = super::scanner::parse_skill_md(&source_skill_md_path)
+        .ok_or_else(|| "Source does not contain valid SKILL.md frontmatter".to_string())?;
+
+    replace_dir_from_source(&source_dir, &target_dir)?;
+
+    let skill_md_path = target_dir.join("SKILL.md");
+    let now = Utc::now().to_rfc3339();
+    db::upsert_skill(
+        pool,
+        &db::Skill {
+            id: skill_id.clone(),
+            name: info.name,
+            description: info.description,
+            file_path: skill_md_path.to_string_lossy().into_owned(),
+            canonical_path: Some(target_dir.to_string_lossy().into_owned()),
+            is_central: true,
+            source: Some("copy".to_string()),
+            content: None,
+            scanned_at: now.clone(),
+        },
+    )
+    .await?;
+    db::upsert_skill_source(
+        pool,
+        &db::SkillSource {
+            synced_at: now,
+            ..source
+        },
+    )
+    .await?;
+
+    let all = get_central_skills(state).await?;
+    all.into_iter()
+        .find(|skill| skill.id == skill_id)
+        .ok_or_else(|| format!("Skill '{}' was synced but not found", skill_id))
 }
 
 /// Tauri command: return detailed information about a skill, including all
@@ -565,6 +685,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_central_skills_includes_recorded_source() {
+        let pool = setup_test_db().await;
+
+        let central_skill = make_skill("central-source", "Central Source", true);
+        db::upsert_skill(&pool, &central_skill).await.unwrap();
+        db::upsert_skill_source(
+            &pool,
+            &db::SkillSource {
+                skill_id: "central-source".to_string(),
+                source_type: "local".to_string(),
+                source_ref: Some("/tmp/project".to_string()),
+                source_path: "/tmp/project/.claude/skills/central-source".to_string(),
+                synced_at: "2026-06-16T00:00:00Z".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let skills_with_links = get_central_skills_impl(&pool).await.unwrap();
+        assert_eq!(skills_with_links.len(), 1);
+        assert_eq!(skills_with_links[0].source_type.as_deref(), Some("local"));
+        assert_eq!(
+            skills_with_links[0].source_path.as_deref(),
+            Some("/tmp/project/.claude/skills/central-source")
+        );
+    }
+
+    #[test]
+    fn test_replace_dir_from_source_overwrites_central_copy() {
+        let tmp = TempDir::new().unwrap();
+        let source_dir = tmp.path().join("source-skill");
+        let target_dir = tmp.path().join("central-skill");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(
+            source_dir.join("SKILL.md"),
+            "---\nname: synced\ndescription: New version\n---\n\n# New\n",
+        )
+        .unwrap();
+        fs::write(
+            target_dir.join("SKILL.md"),
+            "---\nname: synced\ndescription: Old version\n---\n\n# Old\n",
+        )
+        .unwrap();
+
+        replace_dir_from_source(&source_dir, &target_dir).unwrap();
+
+        let synced = fs::read_to_string(target_dir.join("SKILL.md")).unwrap();
+        assert!(synced.contains("New version"));
+        assert!(!synced.contains("Old version"));
+    }
+
+    #[tokio::test]
     async fn test_get_central_skills_ignores_claude_plugin_observations() {
         let pool = setup_test_db().await;
 
@@ -743,6 +916,7 @@ mod tests {
             let linked_agents: Vec<String> =
                 installations.into_iter().map(|i| i.agent_id).collect();
             let (created_at, updated_at) = skill_filesystem_timestamps(&skill);
+            let source = db::get_skill_source(pool, &skill.id).await?;
             result.push(SkillWithLinks {
                 id: skill.id,
                 name: skill.name,
@@ -754,6 +928,10 @@ mod tests {
                 scanned_at: skill.scanned_at,
                 created_at,
                 updated_at,
+                source_type: source.as_ref().map(|s| s.source_type.clone()),
+                source_ref: source.as_ref().and_then(|s| s.source_ref.clone()),
+                source_path: source.as_ref().map(|s| s.source_path.clone()),
+                source_synced_at: source.as_ref().map(|s| s.synced_at.clone()),
                 linked_agents,
             });
         }

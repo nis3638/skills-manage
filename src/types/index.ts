@@ -125,6 +125,10 @@ export interface SkillWithLinks {
   scanned_at: string;
   created_at?: string;
   updated_at?: string;
+  source_type?: string | null;
+  source_ref?: string | null;
+  source_path?: string | null;
+  source_synced_at?: string | null;
   /** Agent IDs that currently have this skill installed (symlink or copy). */
   linked_agents: string[];
 }

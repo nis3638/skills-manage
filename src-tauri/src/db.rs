@@ -38,6 +38,15 @@ pub struct SkillInstallation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct SkillSource {
+    pub skill_id: String,
+    pub source_type: String,
+    pub source_ref: Option<String>,
+    pub source_path: String,
+    pub synced_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct AgentSkillObservation {
     pub row_id: String,
     pub agent_id: String,
@@ -159,6 +168,21 @@ pub async fn init_database(pool: &DbPool) -> Result<(), String> {
             symlink_target TEXT,
             created_at     TEXT NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (skill_id, agent_id)
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // skill_sources table — remembers where a central skill was imported from
+    // so the user can explicitly resync after updating that source externally.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS skill_sources (
+            skill_id    TEXT PRIMARY KEY,
+            source_type TEXT NOT NULL,
+            source_ref  TEXT,
+            source_path TEXT NOT NULL,
+            synced_at   TEXT NOT NULL
         )",
     )
     .execute(pool)
@@ -1540,6 +1564,11 @@ pub async fn get_skill_by_id(pool: &DbPool, skill_id: &str) -> Result<Option<Ski
 
 /// Delete a skill and all its installation records.
 pub async fn delete_skill(pool: &DbPool, skill_id: &str) -> Result<(), String> {
+    sqlx::query("DELETE FROM skill_sources WHERE skill_id = ?")
+        .bind(skill_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     sqlx::query("DELETE FROM skill_installations WHERE skill_id = ?")
         .bind(skill_id)
         .execute(pool)
@@ -1550,6 +1579,39 @@ pub async fn delete_skill(pool: &DbPool, skill_id: &str) -> Result<(), String> {
         .execute(pool)
         .await
         .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+pub async fn upsert_skill_source(pool: &DbPool, source: &SkillSource) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO skill_sources
+         (skill_id, source_type, source_ref, source_path, synced_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(skill_id) DO UPDATE SET
+           source_type = excluded.source_type,
+           source_ref  = excluded.source_ref,
+           source_path = excluded.source_path,
+           synced_at   = excluded.synced_at",
+    )
+    .bind(&source.skill_id)
+    .bind(&source.source_type)
+    .bind(&source.source_ref)
+    .bind(&source.source_path)
+    .bind(&source.synced_at)
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+pub async fn get_skill_source(
+    pool: &DbPool,
+    skill_id: &str,
+) -> Result<Option<SkillSource>, String> {
+    sqlx::query_as::<_, SkillSource>("SELECT * FROM skill_sources WHERE skill_id = ?")
+        .bind(skill_id)
+        .fetch_optional(pool)
+        .await
         .map_err(|e| e.to_string())
 }
 
@@ -1680,6 +1742,10 @@ pub async fn delete_skills_not_in_scope(
 ) -> Result<(), String> {
     if found_skill_ids.is_empty() {
         // Nothing found — delete all installation records first, then all skills.
+        sqlx::query("DELETE FROM skill_sources")
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
         sqlx::query("DELETE FROM skill_installations")
             .execute(pool)
             .await
@@ -1707,6 +1773,16 @@ pub async fn delete_skills_not_in_scope(
         q = q.bind(id.as_str());
     }
     q.execute(pool).await.map_err(|e| e.to_string())?;
+
+    let source_sql = format!(
+        "DELETE FROM skill_sources WHERE skill_id NOT IN ({})",
+        placeholders
+    );
+    let mut q_sources = sqlx::query(&source_sql);
+    for id in found_skill_ids {
+        q_sources = q_sources.bind(id.as_str());
+    }
+    q_sources.execute(pool).await.map_err(|e| e.to_string())?;
 
     // Remove the stale skills themselves.
     let skill_sql = format!("DELETE FROM skills WHERE id NOT IN ({})", placeholders);

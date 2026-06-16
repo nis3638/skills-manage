@@ -1,5 +1,5 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { Search, RefreshCw, Blocks, FolderOpen, Settings, ArrowUpDown } from "lucide-react";
+import { Search, RefreshCw, Blocks, FolderOpen, Settings, ArrowUpDown, Info } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
@@ -84,6 +84,7 @@ const noopGetSkillsByAgent = async (_agentId: string) => {};
 const noopPreviewGitHubRepoImport = async () => null;
 const noopResetGitHubImport = () => {};
 const noopTogglePlatformLink = async (_skillId: string, _agentId: string) => {};
+const noopSyncSkillFromSource = async (_skillId: string) => {};
 const noopInstallSkill = async () => ({
   succeeded: [],
   failed: [],
@@ -194,6 +195,10 @@ export function CentralSkillsView() {
     useCentralSkillsStore((state) => state.togglePlatformLink) ??
     noopTogglePlatformLink;
   const togglingAgentId = useCentralSkillsStore((state) => state.togglingAgentId);
+  const syncingSkillId = useCentralSkillsStore((state) => state.syncingSkillId);
+  const syncSkillFromSource =
+    useCentralSkillsStore((state) => state.syncSkillFromSource) ??
+    noopSyncSkillFromSource;
 
   // Keep the platform sidebar counts in sync after install.
   const refreshCounts =
@@ -333,6 +338,16 @@ export function CentralSkillsView() {
     }
   }
 
+  async function handleSyncFromSource(skill: SkillWithLinks) {
+    try {
+      await syncSkillFromSource(skill.id);
+      await refreshCounts();
+      toast.success(t("central.syncFromSourceSuccess", { name: skill.name }));
+    } catch (err) {
+      toast.error(t("central.syncFromSourceError", { error: String(err) }));
+    }
+  }
+
   async function handleRefresh() {
     try {
       // Re-scan the filesystem first so new/removed skills are picked up,
@@ -402,6 +417,10 @@ export function CentralSkillsView() {
         description={skill.description}
         onDetail={() => handleOpenDrawer(skill.id)}
         onInstallTo={() => handleInstallClick(skill)}
+        onSyncFromSource={
+          skill.source_path ? () => handleSyncFromSource(skill) : undefined
+        }
+        isLoading={syncingSkillId === skill.id}
         detailButtonRef={(node) => setDetailButtonRef(skill.id, node)}
         className="h-[104px]"
       />
@@ -428,6 +447,10 @@ export function CentralSkillsView() {
           <p className="text-sm text-muted-foreground mt-0.5">
             {centralSkillsDir}
           </p>
+          <div className="mt-2 flex max-w-3xl items-start gap-2 text-xs text-muted-foreground">
+            <Info className="mt-0.5 size-3.5 shrink-0" />
+            <p>{t("central.externalCliHint", { path: centralSkillsDir })}</p>
+          </div>
         </div>
         <Button variant="outline" onClick={() => setIsGitHubImportOpen(true)}>
           {t("marketplace.githubImportSecondaryCta")}
@@ -535,6 +558,10 @@ export function CentralSkillsView() {
                 description={skill.description}
                 onDetail={() => handleOpenDrawer(skill.id)}
                 onInstallTo={() => handleInstallClick(skill)}
+                onSyncFromSource={
+                  skill.source_path ? () => handleSyncFromSource(skill) : undefined
+                }
+                isLoading={syncingSkillId === skill.id}
                 detailButtonRef={(node) => setDetailButtonRef(skill.id, node)}
                 platformIcons={{
                   agents,

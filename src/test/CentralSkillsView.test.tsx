@@ -116,6 +116,7 @@ const mockSkills: SkillWithLinks[] = [
 const mockLoadCentralSkills = vi.fn();
 const mockInstallSkill = vi.fn();
 const mockTogglePlatformLink = vi.fn();
+const mockSyncSkillFromSource = vi.fn();
 const mockRescan = vi.fn();
 const mockGetSkillsByAgent = vi.fn();
 const mockPreviewGitHubRepoImport = vi.fn();
@@ -133,10 +134,12 @@ function buildCentralStoreState(overrides = {}) {
     isLoading: false,
     isInstalling: false,
     togglingAgentId: null,
+    syncingSkillId: null,
     error: null,
     loadCentralSkills: mockLoadCentralSkills,
     installSkill: mockInstallSkill,
     togglePlatformLink: mockTogglePlatformLink,
+    syncSkillFromSource: mockSyncSkillFromSource,
     ...overrides,
   };
 }
@@ -232,6 +235,12 @@ describe("CentralSkillsView", () => {
     ).toBeInTheDocument();
   });
 
+  it("explains how external CLI installs become central skills", () => {
+    renderCentralSkillsView();
+    expect(screen.getByText(/npx skills@latest add/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Users\/test\/.agents\/skills/).length).toBeGreaterThanOrEqual(1);
+  });
+
   it("shows the shared github import launcher", () => {
     renderCentralSkillsView();
     expect(screen.getByRole("button", { name: /从 GitHub 导入/i })).toBeInTheDocument();
@@ -302,6 +311,34 @@ describe("CentralSkillsView", () => {
       name: /将 .* 安装到平台/i,
     });
     expect(installButtons).toHaveLength(2);
+  });
+
+  it("syncs a central skill from its recorded source", async () => {
+    mockUseCentralSkillsStore.mockImplementation((selector?: unknown) => {
+      const state = buildCentralStoreState({
+        skills: [
+          {
+            ...mockSkills[0],
+            source_path: "/Users/test/downloaded/frontend-design",
+          },
+        ],
+      });
+      if (typeof selector === "function") return selector(state);
+      return state;
+    });
+
+    render(
+      <MemoryRouter>
+        <CentralSkillsView />
+      </MemoryRouter>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /从来源同步 frontend-design/i }));
+
+    await waitFor(() => {
+      expect(mockSyncSkillFromSource).toHaveBeenCalledWith("frontend-design");
+      expect(mockRescan).toHaveBeenCalled();
+    });
   });
 
   it("renders browser fixture skill card on the localhost validation surface without Tauri", async () => {

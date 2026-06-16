@@ -815,8 +815,11 @@ pub async fn import_discovered_skill_to_central(
         .await?
         .ok_or_else(|| format!("Discovered skill '{}' not found", discovered_skill_id))?;
 
-    // Determine central dir.
-    let central_dir = central_skills_dir();
+    // Determine central dir from the user-configurable Central agent.
+    let central_dir = db::get_agent_by_id(pool, "central")
+        .await?
+        .map(|agent| PathBuf::from(agent.global_skills_dir))
+        .unwrap_or_else(central_skills_dir);
 
     // Extract the original skill directory name (last component of dir_path).
     let skill_dir_name = Path::new(&skill.dir_path)
@@ -854,9 +857,20 @@ pub async fn import_discovered_skill_to_central(
             is_central: true,
             source: Some("copy".to_string()),
             content: None,
-            scanned_at: now,
+            scanned_at: now.clone(),
         };
         db::upsert_skill(pool, &db_skill).await?;
+        db::upsert_skill_source(
+            pool,
+            &db::SkillSource {
+                skill_id: skill_dir_name.clone(),
+                source_type: "local".to_string(),
+                source_ref: Some(skill.project_path.clone()),
+                source_path: skill.dir_path.clone(),
+                synced_at: now,
+            },
+        )
+        .await?;
     }
 
     // Remove the discovered skill record since it's now centralized.
@@ -1224,6 +1238,13 @@ mod tests {
             record.is_none(),
             "discovered skill record should be removed"
         );
+
+        let source = db::get_skill_source(&pool, "my-skill")
+            .await
+            .unwrap()
+            .expect("imported central skill should remember its source");
+        assert_eq!(source.source_type, "local");
+        assert_eq!(source.source_path, skill_dir.to_string_lossy());
     }
 
     /// Implementation of import_discovered_skill_to_central that accepts a custom central_dir
@@ -1271,9 +1292,20 @@ mod tests {
                 is_central: true,
                 source: Some("copy".to_string()),
                 content: None,
-                scanned_at: now,
+                scanned_at: now.clone(),
             };
             db::upsert_skill(pool, &db_skill).await?;
+            db::upsert_skill_source(
+                pool,
+                &db::SkillSource {
+                    skill_id: skill_dir_name.clone(),
+                    source_type: "local".to_string(),
+                    source_ref: Some(skill.project_path.clone()),
+                    source_path: skill.dir_path.clone(),
+                    synced_at: now,
+                },
+            )
+            .await?;
         }
 
         db::delete_discovered_skill(pool, discovered_skill_id).await?;
