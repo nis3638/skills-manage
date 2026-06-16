@@ -85,6 +85,7 @@ const noopPreviewGitHubRepoImport = async () => null;
 const noopResetGitHubImport = () => {};
 const noopTogglePlatformLink = async (_skillId: string, _agentId: string) => {};
 const noopSyncSkillFromSource = async (_skillId: string) => {};
+const noopSyncAllSkillsFromSources = async () => 0;
 const noopInstallSkill = async () => ({
   succeeded: [],
   failed: [],
@@ -196,9 +197,13 @@ export function CentralSkillsView() {
     noopTogglePlatformLink;
   const togglingAgentId = useCentralSkillsStore((state) => state.togglingAgentId);
   const syncingSkillId = useCentralSkillsStore((state) => state.syncingSkillId);
+  const isSyncingSources = useCentralSkillsStore((state) => state.isSyncingSources);
   const syncSkillFromSource =
     useCentralSkillsStore((state) => state.syncSkillFromSource) ??
     noopSyncSkillFromSource;
+  const syncAllSkillsFromSources =
+    useCentralSkillsStore((state) => state.syncAllSkillsFromSources) ??
+    noopSyncAllSkillsFromSources;
 
   // Keep the platform sidebar counts in sync after install.
   const refreshCounts =
@@ -249,6 +254,10 @@ export function CentralSkillsView() {
     [skills]
   );
   const isSearchActive = normalizedSearchQuery.length > 0;
+  const sourceSkillCount = useMemo(
+    () => skills.filter((skill) => Boolean(skill.source_path)).length,
+    [skills]
+  );
 
   // Load central skills on mount.
   useEffect(() => {
@@ -345,6 +354,16 @@ export function CentralSkillsView() {
       toast.success(t("central.syncFromSourceSuccess", { name: skill.name }));
     } catch (err) {
       toast.error(t("central.syncFromSourceError", { error: String(err) }));
+    }
+  }
+
+  async function handleSyncAllFromSources() {
+    try {
+      const syncedCount = await syncAllSkillsFromSources();
+      await refreshCounts();
+      toast.success(t("central.syncAllFromSourcesSuccess", { count: syncedCount }));
+    } catch (err) {
+      toast.error(t("central.syncAllFromSourcesError", { error: String(err) }));
     }
   }
 
@@ -452,9 +471,21 @@ export function CentralSkillsView() {
             <p>{t("central.externalCliHint", { path: centralSkillsDir })}</p>
           </div>
         </div>
-        <Button variant="outline" onClick={() => setIsGitHubImportOpen(true)}>
-          {t("marketplace.githubImportSecondaryCta")}
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={handleSyncAllFromSources}
+            disabled={isSyncingSources || sourceSkillCount === 0}
+            aria-label={t("central.syncAllFromSources")}
+            className="gap-2"
+          >
+            <RefreshCw className={`size-4 ${isSyncingSources ? "animate-spin" : ""}`} />
+            {t("central.syncAllFromSources")}
+          </Button>
+          <Button variant="outline" onClick={() => setIsGitHubImportOpen(true)}>
+            {t("marketplace.githubImportSecondaryCta")}
+          </Button>
+        </div>
       </div>
 
       {/* Search bar */}

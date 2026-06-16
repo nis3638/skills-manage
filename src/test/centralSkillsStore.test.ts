@@ -76,6 +76,7 @@ describe("centralSkillsStore", () => {
       isInstalling: false,
       togglingAgentId: null,
       syncingSkillId: null,
+      isSyncingSources: false,
       error: null,
     });
     vi.clearAllMocks();
@@ -91,6 +92,7 @@ describe("centralSkillsStore", () => {
     expect(state.isInstalling).toBe(false);
     expect(state.togglingAgentId).toBeNull();
     expect(state.syncingSkillId).toBeNull();
+    expect(state.isSyncingSources).toBe(false);
     expect(state.error).toBeNull();
   });
 
@@ -249,6 +251,53 @@ describe("centralSkillsStore", () => {
     expect(invoke).toHaveBeenCalledWith("get_central_skills");
     expect(useCentralSkillsStore.getState().skills).toEqual(refreshedSkills);
     expect(useCentralSkillsStore.getState().syncingSkillId).toBeNull();
+  });
+
+  it("syncs every skill with a recorded source then refreshes central skills once", async () => {
+    const sourcedSkills = [
+      {
+        ...mockSkills[0],
+        source_path: "/tmp/source/frontend-design",
+      },
+      mockSkills[1],
+      {
+        ...mockSkills[1],
+        id: "api-design",
+        name: "api-design",
+        source_path: "/tmp/source/api-design",
+      },
+    ];
+    const refreshedSkills = sourcedSkills.map((skill) => ({
+      ...skill,
+      source_synced_at: "2026-06-16T00:00:00Z",
+    }));
+
+    useCentralSkillsStore.setState({ skills: sourcedSkills });
+    vi.mocked(invoke)
+      .mockResolvedValueOnce(sourcedSkills[0])
+      .mockResolvedValueOnce(sourcedSkills[2])
+      .mockResolvedValueOnce(refreshedSkills);
+
+    await useCentralSkillsStore.getState().syncAllSkillsFromSources();
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "sync_central_skill_from_source", {
+      skillId: "frontend-design",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "sync_central_skill_from_source", {
+      skillId: "api-design",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "get_central_skills");
+    expect(useCentralSkillsStore.getState().skills).toEqual(refreshedSkills);
+    expect(useCentralSkillsStore.getState().isSyncingSources).toBe(false);
+  });
+
+  it("does not call the backend when no central skills have a recorded source", async () => {
+    useCentralSkillsStore.setState({ skills: mockSkills });
+
+    await useCentralSkillsStore.getState().syncAllSkillsFromSources();
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(useCentralSkillsStore.getState().isSyncingSources).toBe(false);
   });
 
   // ── togglePlatformLink ────────────────────────────────────────────────────

@@ -59,6 +59,8 @@ interface CentralSkillsState {
   togglingAgentId: string | null;
   /** Skill ID currently being synced from its recorded source. */
   syncingSkillId: string | null;
+  /** True while all skills with recorded sources are being synced. */
+  isSyncingSources: boolean;
   error: string | null;
 
   // Actions
@@ -70,6 +72,7 @@ interface CentralSkillsState {
   ) => Promise<BatchInstallResult>;
   togglePlatformLink: (skillId: string, agentId: string) => Promise<void>;
   syncSkillFromSource: (skillId: string) => Promise<void>;
+  syncAllSkillsFromSources: () => Promise<number>;
 }
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -81,6 +84,7 @@ export const useCentralSkillsStore = create<CentralSkillsState>((set, get) => ({
   isInstalling: false,
   togglingAgentId: null,
   syncingSkillId: null,
+  isSyncingSources: false,
   error: null,
 
   /**
@@ -120,6 +124,32 @@ export const useCentralSkillsStore = create<CentralSkillsState>((set, get) => ({
       set({ skills, syncingSkillId: null });
     } catch (err) {
       set({ error: String(err), syncingSkillId: null });
+      throw err;
+    }
+  },
+
+  syncAllSkillsFromSources: async () => {
+    const sourceSkillIds = get()
+      .skills.filter((skill) => Boolean(skill.source_path))
+      .map((skill) => skill.id);
+
+    if (sourceSkillIds.length === 0) return 0;
+
+    set({ isSyncingSources: true, error: null });
+    if (!isTauriRuntime()) {
+      set({ isSyncingSources: false });
+      return sourceSkillIds.length;
+    }
+
+    try {
+      for (const skillId of sourceSkillIds) {
+        await invoke<SkillWithLinks>("sync_central_skill_from_source", { skillId });
+      }
+      const skills = await invoke<SkillWithLinks[]>("get_central_skills");
+      set({ skills, isSyncingSources: false });
+      return sourceSkillIds.length;
+    } catch (err) {
+      set({ error: String(err), isSyncingSources: false });
       throw err;
     }
   },

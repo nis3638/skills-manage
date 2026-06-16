@@ -117,6 +117,7 @@ const mockLoadCentralSkills = vi.fn();
 const mockInstallSkill = vi.fn();
 const mockTogglePlatformLink = vi.fn();
 const mockSyncSkillFromSource = vi.fn();
+const mockSyncAllSkillsFromSources = vi.fn();
 const mockRescan = vi.fn();
 const mockGetSkillsByAgent = vi.fn();
 const mockPreviewGitHubRepoImport = vi.fn();
@@ -135,11 +136,13 @@ function buildCentralStoreState(overrides = {}) {
     isInstalling: false,
     togglingAgentId: null,
     syncingSkillId: null,
+    isSyncingSources: false,
     error: null,
     loadCentralSkills: mockLoadCentralSkills,
     installSkill: mockInstallSkill,
     togglePlatformLink: mockTogglePlatformLink,
     syncSkillFromSource: mockSyncSkillFromSource,
+    syncAllSkillsFromSources: mockSyncAllSkillsFromSources,
     ...overrides,
   };
 }
@@ -339,6 +342,41 @@ describe("CentralSkillsView", () => {
       expect(mockSyncSkillFromSource).toHaveBeenCalledWith("frontend-design");
       expect(mockRescan).toHaveBeenCalled();
     });
+  });
+
+  it("syncs all central skills that have recorded sources from the header action", async () => {
+    mockUseCentralSkillsStore.mockImplementation((selector?: unknown) => {
+      const state = buildCentralStoreState({
+        skills: [
+          {
+            ...mockSkills[0],
+            source_path: "/Users/test/downloaded/frontend-design",
+          },
+          mockSkills[1],
+        ],
+      });
+      if (typeof selector === "function") return selector(state);
+      return state;
+    });
+
+    render(
+      <MemoryRouter>
+        <CentralSkillsView />
+      </MemoryRouter>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /同步全部外部技能/i }));
+
+    await waitFor(() => {
+      expect(mockSyncAllSkillsFromSources).toHaveBeenCalledTimes(1);
+      expect(mockRescan).toHaveBeenCalled();
+    });
+  });
+
+  it("disables the header source sync action when no skills have recorded sources", () => {
+    renderCentralSkillsView();
+
+    expect(screen.getByRole("button", { name: /同步全部外部技能/i })).toBeDisabled();
   });
 
   it("renders browser fixture skill card on the localhost validation surface without Tauri", async () => {

@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.9.6 - 2026-06-16
+
+### Features
+
+- Added a **Sync all external skills** action to the Central Library header for one-click refresh of every skill with a recorded source.
+- Bulk source sync reuses the single-skill refresh flow and only touches skills with `source_path`; central-only skills without source metadata are skipped.
+
+## 0.9.5 - 2026-06-16
+
+Feature release: the central skills library can now track imported external skill sources and refresh those central copies from their original source directories.
+
+### Features
+
+- **Central skill source tracking**: importing a skill from Discover into the central library now records the original directory path so the central card knows where the skill came from.
+- **Refresh from source**: central skill cards with a recorded source now expose a sync action that re-imports the source directory and replaces the old central copy.
+- **External CLI install guidance**: the Central Library header now explains that external installs such as `npx skills@latest add ...` only appear there when they write into the configured central directory; otherwise users should scan and import them from Discover.
+
+### Improvements
+
+- Discover imports now use the user-configured central skills directory instead of falling back to the default path.
+- Central skill list responses include source type, source ref, source path, and last sync time so the UI can decide whether to show the sync action.
+- Source refresh validates the source `SKILL.md` frontmatter before replacing the central directory, avoiding invalid source folders being written into the central library.
+
+### Backend
+
+- Added a `skill_sources` table to persist the relationship between central skills and external source directories.
+- Added the `sync_central_skill_from_source` Tauri command to validate the source, back up the old central directory, copy the new contents, and update sync metadata.
+- Skill deletion and purge flows now remove matching source rows to avoid orphaned metadata.
+
+### Tests
+
+- Added Central Library UI tests for the external CLI hint and source-sync action.
+- Added store coverage for the `syncSkillFromSource` action state.
+- Added Rust coverage for source persistence, Discover import metadata, and refresh-from-source behavior.
+
 ## 0.9.4 - 2026-04-28
 
 Feature release for the project-discovery scan-roots dialog: users can now add their own scan paths, copy any path to the clipboard, and long paths render with a middle ellipsis instead of overflowing.
